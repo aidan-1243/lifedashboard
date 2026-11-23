@@ -1656,7 +1656,7 @@ import * as RW from './rewards.js';
   const rwDate = (d) => `${RW.MONTHS[d.getMonth()]} ${d.getDate()}`;
   const rwDays = (n) => (n <= 1 ? 'last day' : `${n} days left`);
   const rwPill = (v) => `<span class="rw-pill ${v.k}">${esc(v.label)}</span>`;
-  const RW_TABS = [['cards', 'Cards'], ['use', 'To use'], ['points', 'Points']];
+  const RW_TABS = [['cards', 'Cards'], ['use', 'Credits'], ['points', 'Points']];
 
   function viewRewards() {
     const tab = ui.rwTab || 'cards';
@@ -1713,7 +1713,7 @@ import * as RW from './rewards.js';
         <div class="meta">${esc(rwOwner(c))}'s ${esc(c.name)} · ${esc(rwDays(x.days))}</div></button></li>`;
   }
 
-  // To use: every credit with money left, grouped by when it runs out; then certificates
+  // Credits: every credit with money left, grouped by when it runs out; then certificates
   function rwToUse() {
     const ctx = rwCtx();
     const open = RW.openCredits(ctx);
@@ -1892,7 +1892,7 @@ import * as RW from './rewards.js';
           <label class="field"><span>Date</span><input name="date" type="date" value="${todayYmd()}" max="${todayYmd()}" required></label></div>
         <label class="field"><span>Note (optional)</span><input name="note" maxlength="200" placeholder="Disney+ bill"></label>
         <div class="btns"><button type="submit" class="btn dark">Log it</button></div>
-        ${p && left > 0.004 ? `<button type="button" class="link" data-rwb="snooze">${snoozed ? 'Show it on To use again' : `Hide until ${esc(rwDate(back))} (not using it this time)`}</button>` : ''}
+        ${p && left > 0.004 ? `<button type="button" class="link" data-rwb="snooze">${snoozed ? 'Show it in Credits again' : `Hide until ${esc(rwDate(back))} (not using it this time)`}</button>` : ''}
         ${u.mine.length ? `<div class="lbl">This year</div><div class="card no-when"><ul class="list">${u.mine.slice().sort((a, z) => String(z.date || '').localeCompare(String(a.date || ''))).map((l) => `<li class="row"><div class="row-main"><div class="t">${RW.money(l.amount)}${l.kind === 'ytd' ? ' (year total)' : ''}</div><div class="meta">${l.date ? esc(rwDate(RW.parseDate(l.date))) : ''}${l.note ? ` · ${esc(l.note)}` : ''}</div></div><button type="button" class="pbtn icon" data-rwdel="${esc(l.id)}" aria-label="Delete this entry">×</button></li>`).join('')}</ul></div>` : ''}`;
     } else if (b.kind === 'cert') {
       const { cur, past } = RW.certState(ctx, c, b);
@@ -1920,7 +1920,7 @@ import * as RW from './rewards.js';
       const a = el.dataset.rwb;
       try {
         if (a === 'card') openRwCard(c.id);
-        else if (a === 'snooze') { const sn = { ...(c.snoozed || {}) }; if (snoozed) delete sn[b.id]; else sn[b.id] = p.info.key; await rwPatch(c, { snoozed: sn }); sheet.close(); toast(snoozed ? 'Back on To use' : `Hidden until ${rwDate(back)}`); }
+        else if (a === 'snooze') { const sn = { ...(c.snoozed || {}) }; if (snoozed) delete sn[b.id]; else sn[b.id] = p.info.key; await rwPatch(c, { snoozed: sn }); sheet.close(); toast(snoozed ? 'Back in Credits' : `Hidden until ${rwDate(back)}`); }
         else if (a === 'cert-save' || a === 'cert-used') {
           const { cur } = RW.certState(ctx, c, b);
           const entry = { ...(cur && !cur.virtual ? cur : { id: Math.random().toString(36).slice(2, 10), benId: b.id, at: Date.now() }),
