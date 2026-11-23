@@ -272,6 +272,8 @@ import * as TK from './tasks.js';
     if (NAG_SHORT[it.nag]) parts.push(NAG_SHORT[it.nag]);
     if (it.repeat_days) parts.push(REPEATS(it.repeat_days));
     if (it.source === 'wayfare') parts.push('Wayfare');
+    const trip = it.trip_id && (data.trips || []).find((tr) => tr.id === it.trip_id);
+    if (trip && it.source !== 'wayfare') parts.push(esc(trip.name));
     if (it.top3) parts.push('Top 3');
     if (it.shared) parts.push(it.user_id && data.me && it.user_id !== data.me.id ? `Shared by ${esc(personName(it.user_id))}` : 'Shared');
     if (it.snooze_until && Date.parse(it.snooze_until) > now) parts.push(`snoozed till ${fmtTime(it.snooze_until)}`);
@@ -532,15 +534,16 @@ import * as TK from './tasks.js';
       const len = daysBetween(start, end) + 1;
       const big = until > 0 ? `${until}` : `Day ${daysBetween(start, today) + 1}`;
       const unit = until > 0 ? (until === 1 ? 'day' : 'days') : `of ${len}`;
-      const toBook = open.filter((i) => trip.external_id && (i.external_id || '').startsWith(`${trip.external_id}:`));
+      const tripAll = data.items.filter((i) => i.trip_id === trip.id);
+      const toBook = open.filter((i) => i.trip_id === trip.id);
       const late = toBook.filter((i) => i.due_at && Date.parse(i.due_at) < Date.now()).length;
       // Booking status is known only for trips synced from Wayfare
-      const bookBit = !trip.external_id ? '' : toBook.length ? ` · ${toBook.length} to book${late ? ` · <span class="late">${late} late</span>` : ''}` : ' · <span class="ok">✓ booked</span>';
+      const bookBit = !tripAll.length ? '' : toBook.length ? ` · ${tripAll.length - toBook.length} of ${tripAll.length} booked${late ? ` · <span class="late">${late} late</span>` : ''}` : ' · <span class="ok">✓ all booked</span>';
       // Many countries require 6 months of passport validity after you leave.
       const sixAfter = new Date(end); sixAfter.setMonth(sixAfter.getMonth() + 6);
       for (const d of data.documents || []) if (parseDay(d.expires_on) < sixAfter) { if (!warns.has(d.id)) warns.set(d.id, { d, trips: [] }); warns.get(d.id).trips.push(trip.name); }
-      const tag = trip.link ? 'a' : 'button';
-      const attrs = trip.link ? ` href="${esc(trip.link)}" target="_blank" rel="noopener"` : ` type="button" data-act="trip-open" data-id="${trip.id}"`;
+      const tag = 'button';
+      const attrs = ` type="button" data-act="trip-group" data-id="${trip.id}"`;
       return `<${tag} class="trip-row"${attrs} aria-label="${esc(trip.name)}, ${until > 0 ? `${until} days away` : 'in progress'}">
         <span style="min-width:0;flex:1"><strong class="name">${esc(trip.name)}</strong>
           <span class="dates">${esc(fmtRange(trip.start_date, trip.end_date))}${bookBit}</span></span>
@@ -2354,6 +2357,7 @@ import * as TK from './tasks.js';
         <label class="field"><span>Repeats every (days)</span><input type="number" min="1" name="repeat_days" value="${it.repeat_days ?? ''}" placeholder="No"></label>
       </div>
       <label class="field"><span>Person</span><select name="person_id"><option value="">None</option>${people}</select></label>
+      ${(data.trips || []).length ? `<label class="field"><span>Trip</span><select name="trip_id"><option value="">None</option>${data.trips.map((tr) => `<option value="${tr.id}"${it.trip_id === tr.id ? ' selected' : ''}>${esc(tr.name)} (${esc(fmtRange(tr.start_date, tr.end_date))})</option>`).join('')}</select></label>` : ''}
       <label class="field"><span>Notes</span><textarea name="notes">${esc(it.notes)}</textarea></label>
       <label class="inline"><input type="checkbox" name="top3"${it.top3 ? ' checked' : ''}> Top 3 today</label>
       ${others().length ? `<label class="inline"><input type="checkbox" name="shared"${it.shared ? ' checked' : ''}> Shared with ${esc(others().map((u) => u.name).join(', '))}</label>
@@ -2377,6 +2381,7 @@ import * as TK from './tasks.js';
         person_id: f.get('person_id') ? +f.get('person_id') : null,
         notes: f.get('notes').trim() || null, top3: f.get('top3') ? 1 : 0,
       };
+      if (f.has('trip_id')) body.trip_id = f.get('trip_id') ? +f.get('trip_id') : null;
       if (others().length) body.shared = f.get('shared') ? 1 : 0;
       try {
         if (it.id) await api(`/api/items/${it.id}`, { method: 'PATCH', body });
@@ -2455,6 +2460,59 @@ import * as TK from './tasks.js';
     form.querySelector('[data-sheet="close"]').onclick = () => sheet.close();
     showSheet();
   }
+
+  // A trip is a group of tasks: bookings before you go, activities while you're there.
+  function openTripGroup(trip) {
+    if (!trip) return;
+    const today = startOfDay();
+    const start = parseDay(trip.start_date), end = parseDay(trip.end_date || trip.start_date);
+    const endOfTrip = new Date(+end + 864e5);
+    const until = daysBetween(today, start);
+    const items = data.items.filter((i) => i.trip_id === trip.id);
+    const open = items.filter((i) => i.status === 'open');
+    const doneItems = items.filter((i) => i.status === 'done');
+    const during = (i) => i.due_at && new Date(i.due_at) >= start && new Date(i.due_at) < endOfTrip;
+    const before = open.filter((i) => !during(i)), activities = open.filter(during);
+    const events = data.events.filter((e) => !(e.pref && e.pref.hidden) && new Date(e.start_at) >= start && new Date(e.start_at) < endOfTrip)
+      .sort((a, z) => a.start_at.localeCompare(z.start_at));
+    const when = until > 0 ? `in ${plural(until, 'day')}` : today <= end ? `day ${daysBetween(start, today) + 1} of ${daysBetween(start, end) + 1}` : 'finished';
+    const isWayfare = trip.link && /claude\.ai\/artifact/.test(trip.link);
+    sheet.innerHTML = `<form method="dialog" class="tk-sheet">
+      <div class="tk-head"><span class="tk-icon">${kindMark('suitcase', 'k-trip')}</span>
+        <div class="tk-title"><h3>${esc(trip.name)}</h3><p class="sub">${esc(fmtRange(trip.start_date, trip.end_date))} · ${esc(when)}</p></div>
+        ${items.length ? `<span class="tk-fire${open.length ? ' zero' : ''}" aria-label="${doneItems.length} of ${items.length} booked">${doneItems.length}/${items.length} ✓</span>` : ''}</div>
+      <div class="tk-main">
+        ${trip.link ? `<a class="btn dark big" href="${esc(trip.link)}" target="_blank" rel="noopener">${isWayfare ? 'Open in Wayfare' : 'Open trip page'}</a>` : ''}
+        <div class="btns2"><button type="button" class="btn ghost" data-tg="add">Add a booking</button><button type="button" class="btn ghost" data-tg="edit">Edit trip</button></div>
+      </div>
+      ${items.length ? `<div class="tk-progress"><span style="width:${Math.round((doneItems.length / items.length) * 100)}%"></span></div>` : ''}
+      <div class="lbl">Before you go${before.length ? ` · ${before.length} to book` : ''}</div>
+      ${before.length ? listCard(before.map((i) => itemRow(i, { when: i.due_at ? fmtShortDate(i.due_at) : '' }))) : '<div class="tk-group"><div class="tk-row meta">Nothing left to book</div></div>'}
+      <div class="lbl">During the trip</div>
+      ${activities.length || events.length ? listCard([
+        ...events.map((e) => eventRow(e, { when: parseDay(RW.ymd(new Date(e.start_at))).toLocaleDateString([], { weekday: 'short', day: 'numeric' }), meta: e.all_day ? (e.location ? esc(e.location) : 'All day') : `${esc(fmtTime(e.start_at))}${e.location ? ` · ${esc(e.location)}` : ''}` })),
+        ...activities.map((i) => itemRow(i, { when: fmtShortDate(i.due_at) })),
+      ]) : '<div class="tk-group"><div class="tk-row meta">Nothing yet. Calendar events during these dates show up here.</div></div>'}
+      ${doneItems.length ? `<details class="tk-done"><summary>Booked · ${doneItems.length}</summary>${listCard(doneItems.map((i) => itemRow(i, { when: '' })))}</details>` : ''}
+      <div class="actions"><span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Close</button></div>
+    </form>`;
+    const form = sheet.querySelector('form');
+    form.querySelector('[data-tg="add"]').onclick = () => openItem({ title: '', area: 'travel', nag: 'daily', trip_id: trip.id, status: 'open' });
+    form.querySelector('[data-tg="edit"]').onclick = () => openTrip(trip);
+    // Rows inside the trip: check off, reopen, or open a task or event
+    form.addEventListener('click', async (e) => {
+      const el = e.target.closest('[data-act]'); if (!el || !form.contains(el)) return;
+      const id = +el.dataset.id, act = el.dataset.act;
+      try {
+        if (act === 'done') { (el.closest('.row') || el).classList.add('completing'); await new Promise((r) => setTimeout(r, 260)); await markDone(id); openTripGroup(data.trips.find((x) => x.id === trip.id)); }
+        else if (act === 'reopen') { await api(`/api/items/${id}`, { method: 'PATCH', body: { status: 'open' } }); await refresh(); openTripGroup(data.trips.find((x) => x.id === trip.id)); }
+        else if (act === 'edit') openItem(data.items.find((i) => i.id === id));
+        else if (act === 'event') openEvent(data.events.find((x) => x.id === id));
+      } catch (err) { toast(err.message); }
+    });
+    showSheet();
+  }
+  const fmtShortDate = (iso) => new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
 
   function openTrip(t) {
     const bookings = t.id && t.external_id ? data.items.filter((i) => (i.external_id || '').startsWith(`${t.external_id}:`) && i.status === 'open').length : 0;
@@ -2926,6 +2984,7 @@ import * as TK from './tasks.js';
       } else if (act === 'edit-habits') openHabits();
       else if (act === 'event') openEvent(data.events.find((x) => x.id === id));
       else if (act === 'trip-open') openTrip(data.trips.find((x) => x.id === id));
+      else if (act === 'trip-group') openTripGroup(data.trips.find((x) => x.id === id));
       else if (act === 'trip-new') openTrip({});
       else if (act === 'day') openDay(el.dataset.date);
       else if (act === 'toggle-sec') {

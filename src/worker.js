@@ -9,7 +9,7 @@ import { sendWebPush } from './webpush.js';
 import * as RW from '../public/rewards.js';
 import * as TK from '../public/tasks.js';
 
-const ITEM_FIELDS = ['title', 'notes', 'area', 'kind', 'due_at', 'nag', 'repeat_days', 'top3', 'person_id', 'status', 'snooze_until', 'shared'];
+const ITEM_FIELDS = ['title', 'notes', 'area', 'kind', 'due_at', 'nag', 'repeat_days', 'top3', 'person_id', 'status', 'snooze_until', 'shared', 'trip_id'];
 const PERSON_FIELDS = ['name', 'birthday', 'phone', 'email', 'notes', 'checkin_days', 'last_contact_at', 'last_contact_how', 'bday_remind', 'bday_notify', 'circle'];
 
 // Your settings for synced calendar events live in event_prefs, keyed by the
@@ -367,7 +367,8 @@ async function handleApi(req, env, url, ctx, uid) {
   if (path === '/api/state' && method === 'GET') {
     const homeP = loadHome(env);
     const [items, people, events, trips, documents, habits, habitLogs, eventPrefs, gifts, personDates, meds, medLogs, homeTasks, homeLog, meals, mealTitles, settings] = await Promise.all([
-      env.DB.prepare("SELECT * FROM items WHERE (user_id = ? OR shared = 1) AND (status = 'open' OR done_at > datetime('now', '-1 day')) ORDER BY due_at IS NULL, due_at").bind(uid).all(),
+      // Open tasks, ones finished in the last day, and every task in a trip (for "6 of 9 booked")
+      env.DB.prepare("SELECT * FROM items WHERE (user_id = ? OR shared = 1) AND (status = 'open' OR done_at > datetime('now', '-1 day') OR trip_id IS NOT NULL) ORDER BY due_at IS NULL, due_at").bind(uid).all(),
       env.DB.prepare('SELECT * FROM people WHERE user_id = ? ORDER BY name COLLATE NOCASE').bind(uid).all(),
       visibleEvents(env, uid).then((results) => ({ results })),
       env.DB.prepare("SELECT * FROM trips WHERE COALESCE(end_date, start_date) >= date('now', '-1 day') ORDER BY start_date").all(),
@@ -1066,6 +1067,9 @@ async function syncItems(env, body, uid = 1) {
       .bind(i.title, i.notes || null, i.area || 'travel', i.due_at || null, i.nag || 'hourly', source, `${uid === 1 ? '' : `u${uid}:`}${source}:${i.external_id}`,
         i.done ? 'done' : 'open', i.done ? nowIso() : null, uid));
   if (stmts.length) await env.DB.batch(stmts);
+  // Bookings belong to their trip (matched by the trip's Wayfare id)
+  await env.DB.prepare(`UPDATE items SET trip_id = (SELECT t.id FROM trips t WHERE t.external_id IS NOT NULL AND items.external_id LIKE t.external_id || ':%')
+    WHERE trip_id IS NULL AND external_id LIKE ?`).bind(`%${source}:%`).run();
   return { ok: true, synced: stmts.length };
 }
 

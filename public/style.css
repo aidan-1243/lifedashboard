@@ -1068,3 +1068,8 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 .tk-link { width: 100%; background: none; border: 0; border-top: 1px solid var(--line); font: inherit; color: inherit; text-align: left; cursor: pointer; } .tk-group > .tk-link:first-child { border-top: 0; }
 .k-credit { background: var(--a-hoa-bg); color: var(--a-hoa); } .tk-link .rw-chip { width: 34px; }
 .k-meal { background: var(--now-bg); color: var(--now-ink); } .tk-kinds { padding-top: 10px; padding-bottom: 10px; } .tk-kinds .filters { flex-wrap: wrap; } .tk-row .chips-scroll { width: 100%; }
+.k-trip { background: var(--a-travel-bg); color: var(--a-travel); }
+.tk-main a.btn.big { display: flex; align-items: center; justify-content: center; text-decoration: none; }
+.tk-progress { height: 6px; border-radius: 4px; background: var(--soft); overflow: hidden; margin-top: 2px; }
+.tk-progress span { display: block; height: 100%; background: var(--ok); border-radius: 4px; }
+.tk-done summary { cursor: pointer; font-weight: 600; color: var(--muted); padding: 8px 4px; }
