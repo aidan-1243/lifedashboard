@@ -28,11 +28,13 @@ events (read-only, synced from Apple). Tabs stay as views over the same tasks.
 
 ## Streaks
 
-- Count of consecutive scheduled occurrences completed.
-- Skipping, or letting an occurrence pass undone, resets it. Snoozing doesn't, if finished within
-  the same occurrence.
-- Credits: a period counts when the full amount is used; partial use keeps the streak but shows a
-  half box. (Proposed; confirm with Aidan.)
+- Count of consecutive scheduled occurrences completed with the **main (top) button**
+  (Done / Taken / Used / Booked). Only that button counts.
+- Skip and Snooze never add to the streak. An occurrence that ends without the main button
+  (skipped, or left undone) breaks it. Snoozing then finishing with the main button in the same
+  occurrence still counts.
+- Credits: any use in the period counts, including "Used part…" (the history strip still shows a
+  partly used period as a half box).
 
 ## Build order
 
