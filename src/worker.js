@@ -448,13 +448,16 @@ async function handleApi(req, env, url, ctx, uid) {
   if (path === '/api/people' && method === 'POST') {
     const data = pick(body, PERSON_FIELDS);
     if (!data.name) return json({ error: 'name required' }, 400);
-    return json(await insertRow(env, 'people', { ...data, user_id: uid }), 201);
+    const created = await insertRow(env, 'people', { ...data, user_id: uid });
+    await syncPeopleTasks(env, uid, created.id);
+    return json(created, 201);
   }
   if ((m = /^\/api\/people\/(\d+)(\/contact)?$/.exec(path)) && !(await owns(env, 'people', +m[1], uid))) return notYours();
   if ((m = /^\/api\/people\/(\d+)$/.exec(path))) {
-    if (method === 'PATCH') return json(await updateRow(env, 'people', +m[1], pick(body, PERSON_FIELDS)));
+    if (method === 'PATCH') { const r = await updateRow(env, 'people', +m[1], pick(body, PERSON_FIELDS)); await syncPeopleTasks(env, uid, +m[1]); return json(r); }
     if (method === 'DELETE') {
       await env.DB.prepare('DELETE FROM people WHERE id = ?').bind(+m[1]).run();
+      await syncPeopleTasks(env, uid, +m[1]);
       return json({ ok: true });
     }
   }
@@ -462,7 +465,13 @@ async function handleApi(req, env, url, ctx, uid) {
     const at = nowIso();
     const how = (body && body.how) || 'talked';
     await env.DB.prepare('INSERT INTO contact_log (person_id, how, at) VALUES (?, ?, ?)').bind(+m[1], how, at).run();
-    return json(await updateRow(env, 'people', +m[1], { last_contact_at: at, last_contact_how: how }));
+    const r = await updateRow(env, 'people', +m[1], { last_contact_at: at, last_contact_how: how });
+    // The catch-up task: log it done today, then move it to the next check-in date
+    const t = await env.DB.prepare("SELECT id FROM tasks WHERE legacy_ref = ?").bind(`catchup:${+m[1]}`).first();
+    if (t) await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, at, by_user) VALUES (?, ?, 'done', ?, ?)
+      ON CONFLICT(task_id, occ) DO UPDATE SET status = 'done', at = excluded.at`).bind(t.id, localParts(new Date(), env.TZ || 'America/Chicago').date, at, uid).run();
+    await syncPeopleTasks(env, uid, +m[1]);
+    return json(r);
   }
 
   // Quick capture from Siri / Apple Watch: plain text in, a spoken-friendly summary out.
@@ -527,12 +536,15 @@ async function handleApi(req, env, url, ctx, uid) {
     const d = String((body && body.date) || '');
     if (!body.person_id || !/^(\d{4}|-)-?\d{2}-\d{2}$/.test(d)) return json({ error: 'person and date required' }, 400);
     if (!(await owns(env, 'people', +body.person_id, uid))) return notYours();
-    return json(await insertRow(env, 'person_dates', { person_id: +body.person_id, label: String(body.label || 'Date').slice(0, 60), date: d, remind: body.remind ? 1 : 0 }), 201);
+    const pd = await insertRow(env, 'person_dates', { person_id: +body.person_id, label: String(body.label || 'Date').slice(0, 60), date: d, remind: body.remind ? 1 : 0 });
+    await syncPeopleTasks(env, uid, +body.person_id);
+    return json(pd, 201);
   }
   if ((m = /^\/api\/person-dates\/(\d+)$/.exec(path)) && !(await owns(env, 'person_dates', +m[1], uid))) return notYours();
   if ((m = /^\/api\/person-dates\/(\d+)$/.exec(path))) {
-    if (method === 'PATCH') return json(await updateRow(env, 'person_dates', +m[1], pick(body, ['label', 'date', 'remind'])));
-    if (method === 'DELETE') { await env.DB.prepare('DELETE FROM person_dates WHERE id = ?').bind(+m[1]).run(); return json({ ok: true }); }
+    const pid = (await env.DB.prepare('SELECT person_id FROM person_dates WHERE id = ?').bind(+m[1]).first() || {}).person_id;
+    if (method === 'PATCH') { const r = await updateRow(env, 'person_dates', +m[1], pick(body, ['label', 'date', 'remind'])); await syncPeopleTasks(env, uid, pid); return json(r); }
+    if (method === 'DELETE') { await env.DB.prepare('DELETE FROM person_dates WHERE id = ?').bind(+m[1]).run(); await syncPeopleTasks(env, uid, pid); return json({ ok: true }); }
   }
 
   // Medications
@@ -694,7 +706,7 @@ async function handleApi(req, env, url, ctx, uid) {
 
   // Imports and syncs
   if (path === '/api/import/vcard' && method === 'POST') return json(await importVcards(env, await req.text(), uid));
-  if (path === '/api/import/contacts' && method === 'POST') return json(await importContacts(env, body && body.contacts, uid));
+  if (path === '/api/import/contacts' && method === 'POST') { const r = await importContacts(env, body && body.contacts, uid); await syncPeopleTasks(env, uid); return json(r); }
   if (path === '/api/events/sync' && method === 'POST') {
     let events;
     if (body) events = body.events || body;
@@ -734,7 +746,15 @@ async function handleApi(req, env, url, ctx, uid) {
   }
   if ((m = /^\/api\/tasks\/(\d+)(\/log|\/snooze)?$/.exec(path)) && !(await owns(env, 'tasks', +m[1], uid))) return notYours();
   if ((m = /^\/api\/tasks\/(\d+)$/.exec(path))) {
-    if (method === 'PATCH') return json(taskOut(await updateRow(env, 'tasks', +m[1], taskFields(body || {}))));
+    if (method === 'PATCH') {
+      const row = await updateRow(env, 'tasks', +m[1], taskFields(body || {}));
+      if ('nag' in (body || {}) && row && row.legacy_ref) {
+        const [kind, ref] = row.legacy_ref.split(':');
+        if (kind === 'bday') await env.DB.prepare('UPDATE people SET bday_remind = ? WHERE id = ?').bind(row.nag, +ref).run();
+        if (kind === 'pdate') await env.DB.prepare('UPDATE person_dates SET remind = ? WHERE id = ?').bind(row.nag, +ref).run();
+      }
+      return json(taskOut(row));
+    }
     if (method === 'DELETE') { await env.DB.prepare('UPDATE tasks SET archived = 1 WHERE id = ?').bind(+m[1]).run(); return json({ ok: true }); }
   }
   if ((m = /^\/api\/tasks\/(\d+)\/log$/.exec(path)) && method === 'POST') {
@@ -1179,7 +1199,9 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
     else await setSetting(env, 'last_push_error', `${now.toISOString()} · briefing (user ${uid}) · ${lastPushError}`);
   }
   await ensureBackupReminder(env, tz, local, uid, s);
-  await ensureBirthdayReminders(env, tz, local, uid);
+  // Birthdays, important dates and catch-ups are tasks now (synced from People; reminders come
+  // from sendTaskReminders). Only the gift nudge is still generated here.
+  if (!s.people_tasks_v1) { await syncPeopleTasks(env, uid); await setSetting(env, 'people_tasks_v1', nowIso(), uid); }
   await ensurePeopleReminders(env, tz, local, uid);
   // Medications are tasks now (sendTaskReminders); sendMedReminders is kept for reference only.
   report.sent.push(...await sendHomeReminders(env, tz, local, quiet, now, uid));
@@ -1297,13 +1319,51 @@ async function saveHomeTask(env, id, f, uid) {
   return (await loadHome(env)).tasks.find((t) => t.id === id) || { ok: true };
 }
 
+// ---------- People -> tasks ----------
+// Each person's birthday (if shown), important dates and catch-up become tasks, kept in step with
+// the People data. Your reminder choices on a task are kept; the person page's checkboxes set them.
+const yearlyDate = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(d || '') ? d : /^--\d{2}-\d{2}$/.test(d || '') ? `2000${d.slice(1)}` : null);
+async function syncPeopleTasks(env, uid, personId = null) {
+  const tz = env.TZ || 'America/Chicago';
+  const today = localParts(new Date(), tz).date;
+  const people = (await env.DB.prepare(`SELECT * FROM people WHERE user_id = ?${personId ? ' AND id = ?' : ''}`).bind(...(personId ? [uid, personId] : [uid])).all()).results;
+  const dates = people.length ? (await env.DB.prepare(`SELECT * FROM person_dates WHERE person_id IN (${people.map(() => '?').join(',')})`).bind(...people.map((p) => p.id)).all()).results : [];
+  const want = [];
+  for (const p of people) {
+    const first = String(p.name).split(' ')[0];
+    const bd = yearlyDate(p.birthday);
+    if (bd && p.bday_notify !== 0) want.push({ ref: `bday:${p.id}`, kind: 'birthday', title: `${p.name}'s birthday`, date: bd, repeat: 'yearly', nag: p.bday_remind ? 1 : 0, details: { person_id: p.id, first } });
+    for (const d of dates.filter((x) => x.person_id === p.id)) {
+      const dd = yearlyDate(d.date);
+      if (dd) want.push({ ref: `pdate:${d.id}`, kind: 'pdate', title: `${first}: ${d.label}`, date: dd, repeat: 'yearly', nag: d.remind ? 1 : 0, details: { person_id: p.id, first, label: d.label } });
+    }
+    if (p.checkin_days) {
+      const lastDay = p.last_contact_at ? localParts(new Date(p.last_contact_at), tz).date : null;
+      const due = lastDay ? new Date(Date.UTC(+lastDay.slice(0, 4), +lastDay.slice(5, 7) - 1, +lastDay.slice(8, 10) + p.checkin_days)).toISOString().slice(0, 10) : today;
+      want.push({ ref: `catchup:${p.id}`, kind: 'catchup', title: `Catch up with ${p.name}`, date: due, repeat: 'never', nag: null, details: { person_id: p.id, first, every: p.checkin_days } });
+    }
+  }
+  const stmts = want.map((w) => env.DB.prepare(`INSERT INTO tasks (user_id, kind, title, details, date, repeat, nag, nag_mode, archived, legacy_ref, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'hourly', 0, ?, ?)
+      ON CONFLICT(legacy_ref) DO UPDATE SET title = excluded.title, details = excluded.details, date = excluded.date, repeat = excluded.repeat, archived = 0,
+        nag = CASE WHEN ? IS NULL THEN tasks.nag ELSE excluded.nag END`)
+    .bind(uid, w.kind, w.title, JSON.stringify(w.details), w.date, w.repeat, w.nag ?? 0, w.ref, nowIso(), w.nag));
+  // Anything this person (or everyone, on a full sync) no longer has is archived
+  const keep = want.map((w) => w.ref);
+  const scope = personId ? `AND (legacy_ref LIKE 'bday:${+personId}' OR legacy_ref LIKE 'catchup:${+personId}' OR (kind = 'pdate' AND json_extract(details, '$.person_id') = ${+personId}))` : '';
+  stmts.push(env.DB.prepare(`UPDATE tasks SET archived = 1 WHERE user_id = ? AND kind IN ('birthday', 'pdate', 'catchup') ${scope}
+    ${keep.length ? `AND legacy_ref NOT IN (${keep.map(() => '?').join(',')})` : ''}`).bind(uid, ...keep));
+  for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
+  return want.length;
+}
+
 // ---------- Tasks ----------
 const TASK_REPEATS = ['never', 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'yearly', 'custom'];
 function taskFields(b) {
   const out = {};
   const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '') ? v : null);
   if ('title' in b) out.title = String(b.title || '').trim().slice(0, 120);
-  if ('kind' in b) out.kind = ['task', 'habit', 'med', 'home'].includes(b.kind) ? b.kind : 'task';
+  if ('kind' in b) out.kind = ['task', 'habit', 'med', 'home', 'birthday', 'pdate', 'catchup'].includes(b.kind) ? b.kind : 'task';
   if ('details' in b) out.details = b.details && typeof b.details === 'object' ? JSON.stringify(b.details).slice(0, 4000) : null;
   if ('date' in b) out.date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : null;
   if ('time' in b) out.time = hhmm(b.time);
@@ -1373,8 +1433,10 @@ async function sendTaskReminders(env, tz, local, quiet, now, uid) {
     const o = open[0];
     const when = o.late ? `was due ${o.key.slice(5, 10).replace('-', '/')}` : o.tm ? `scheduled ${fmtTime(zonedToUtc(local.y, local.m, local.d, +o.tm.slice(0, 2), +o.tm.slice(3), tz).toISOString(), tz)}` : 'today';
     const dose = t.details && t.details.dose ? ` (${t.details.dose})` : '';
-    const title = t.kind === 'med' ? `${first ? 'Time for' : 'Still need to take'} ${t.title}${dose}` : t.title;
-    const ok = await push(env, { to: uid, tag: `task-${t.id}`, title, message: `${{ habit: 'Habit', med: 'Medication' }[t.kind] || 'Task'} · ${when}`, priority: 4 });
+    const first1 = (t.details && t.details.first) || t.title;
+    const title = t.kind === 'med' ? `${first ? 'Time for' : 'Still need to take'} ${t.title}${dose}`
+      : t.kind === 'birthday' ? `Wish ${first1} a happy birthday` : t.kind === 'catchup' ? `Reach out to ${first1}` : t.title;
+    const ok = await push(env, { to: uid, tag: `task-${t.id}`, title, message: `${{ habit: 'Habit', med: 'Medication', birthday: 'Birthday', pdate: 'Important date', catchup: 'Catch up' }[t.kind] || 'Task'} · ${when}`, priority: 4 });
     if (ok) {
       await env.DB.prepare('INSERT INTO task_nags (key, last_at) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET last_at = excluded.last_at, count = task_nags.count + 1').bind(key, now.toISOString()).run();
       sent.push(key);
@@ -1588,14 +1650,7 @@ async function ensurePeopleReminders(env, tz, local, uid = 1) {
       VALUES (?, ?, 'people', ?, 'daily', ?, 'gift', ?, ?)`).bind(`Pick a gift for ${p.name.split(' ')[0]}`,
       ideas.length ? `Ideas: ${ideas.join(' · ')}` : 'No gift ideas saved yet. Add some on their page.', due, p.id, `gift:${p.id}:${year}`, uid));
   }
-  // Important dates you asked to be reminded about: hourly on the day until done.
-  const mmdd = `${String(local.m).padStart(2, '0')}-${String(local.d).padStart(2, '0')}`;
-  const { results: dates } = await env.DB.prepare(`SELECT d.id, d.label, d.person_id, p.name FROM person_dates d JOIN people p ON p.id = d.person_id
-    WHERE p.user_id = ? AND d.remind = 1 AND d.date LIKE ?`).bind(uid, `%${mmdd}`).all();
-  for (const d of dates) {
-    stmts.push(env.DB.prepare(`INSERT OR IGNORE INTO items (title, area, due_at, nag, person_id, source, external_id, user_id)
-      VALUES (?, 'people', ?, 'hourly', ?, 'date', ?, ?)`).bind(`${d.name.split(' ')[0]}: ${d.label}`, due, d.person_id, `pdate:${d.id}:${local.y}`, uid));
-  }
+  // (Important dates are tasks now.)
   if (stmts.length) await env.DB.batch(stmts);
 }
 

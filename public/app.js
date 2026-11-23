@@ -307,6 +307,7 @@ import * as TK from './tasks.js';
     check: '<rect x="3.5" y="3.5" width="17" height="17" rx="5"/><path d="M8 12.5l3 3 5-6"/>',
     clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
     repeat: '<path d="M4 9a5 5 0 0 1 5-5h9l-3-3M20 15a5 5 0 0 1-5 5H6l3 3"/>',
+    chat: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/>',
   };
   const kindMark = (k, cls = '') => `<span class="evmark ${cls}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${KIND_ICONS[k]}</svg></span>`;
 
@@ -608,9 +609,21 @@ import * as TK from './tasks.js';
   const myHabits = () => (data.tasks || []).filter((t) => t.kind === 'habit' && (!data.me || t.user_id === data.me.id));
   const taskById = (id) => (data.tasks || []).find((t) => t.id === id);
   const taskLog = (t) => (data.task_log || []).filter((l) => l.task_id === t.id);
-  const TASK_MAIN = { habit: 'Done', task: 'Done', med: 'Taken' };
-  const TASK_ICON = { habit: 'check', task: 'check', med: 'pill' };
-  const TASK_NOUN = { habit: 'habit', task: 'task', med: 'medication' };
+  const TASK_MAIN = { habit: 'Done', task: 'Done', med: 'Taken', birthday: 'Wished them', pdate: 'Done', catchup: 'Talked' };
+  const TASK_ICON = { habit: 'check', task: 'check', med: 'pill', birthday: 'balloon', pdate: 'heart', catchup: 'chat' };
+  const TASK_NOUN = { habit: 'habit', task: 'task', med: 'medication', birthday: 'birthday', pdate: 'date', catchup: 'catch-up' };
+  const PEOPLE_KINDS = ['birthday', 'pdate', 'catchup'];
+  // Catch-ups float: due N days after you last talked. Streak = talks in a row, each within
+  // the check-in window (plus 3 days' grace) of the one before, and the latest one still current.
+  function catchupStreak(t) {
+    const every = (t.details && t.details.every) || 30;
+    const days = taskLog(t).filter((l) => l.status !== 'skipped').map((l) => l.occ.slice(0, 10)).sort().reverse();
+    const gap = (a, b) => Math.round((parseDay(a) - parseDay(b)) / 864e5);
+    let current = 0, best = 0, run = 0;
+    for (let i = 0; i < days.length; i++) { run = i && gap(days[i - 1], days[i]) <= every + 3 ? run + 1 : 1; best = Math.max(best, run); }
+    if (days.length && gap(todayYmd(), days[0]) <= every + 3) { current = 1; for (let i = 1; i < days.length && gap(days[i - 1], days[i]) <= every + 3; i++) current++; }
+    return { current, best };
+  }
   const dayLabel = (d) => { const t = todayYmd(); if (d === t) return 'Today'; if (d === TK.addDays(t, 1)) return 'Tomorrow'; if (d === TK.addDays(t, -1)) return 'Yesterday'; return parseDay(d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }); };
 
   // The occurrence the main button acts on: today's first one not done, a missed one-off,
@@ -627,7 +640,7 @@ import * as TK from './tasks.js';
     const key = TK.occKey(next, tm);
     return { date: next, time: tm, key, log: logs.get(key) || null, future: true };
   }
-  const streakOf = (t) => TK.streak(t, taskLog(t), todayYmd());
+  const streakOf = (t) => (t.kind === 'catchup' ? catchupStreak(t) : TK.streak(t, taskLog(t), todayYmd()));
   const flame = (n) => `<span class="tk-fire${n ? '' : ' zero'}" aria-label="${n}-time streak">${n} 🔥</span>`;
 
   async function taskDo(t, status, occ = taskOcc(t)) {
@@ -644,7 +657,9 @@ import * as TK from './tasks.js';
     const t = { kind: 'task', repeat: 'never', nag: 0, nag_mode: 'hourly', date: todayYmd(), time: null, details: {}, ...t0 };
     const details = t.details || {};
     const occ = isNew ? null : taskOcc(t);
-    const st = TK.streak(t, taskLog(t), todayYmd());
+    const st = isNew ? { current: 0, best: 0 } : streakOf(t);
+    const isPeople = PEOPLE_KINDS.includes(t.kind);
+    const person = isPeople && details.person_id ? data.people.find((x) => x.id === details.person_id) : null;
     const done = occ && occ.log && occ.log.status !== 'skipped';
     const status = isNew ? '' : !t.date ? 'No date' : occ ? `${occ.future ? 'Next: ' : ''}${dayLabel(occ.date)}${occ.time ? ` ${fmtSlot(occ.time)}` : ''}${done ? ' · done' : occ.log ? ' · skipped' : ''}` : 'Finished';
     // Custom repeat uses the same chip picker as medications
@@ -652,7 +667,9 @@ import * as TK from './tasks.js';
     const users = data.users || [];
     const opt = (list, sel) => list.map(([v, l]) => `<option value="${v}"${String(sel) === String(v) ? ' selected' : ''}>${esc(l)}</option>`).join('');
     const sw = (name, on, label) => `<label class="tk-row"><span>${label}</span><input type="checkbox" class="tk-switch" name="${name}"${on ? ' checked' : ''}></label>`;
-    const recent = isNew ? [] : TK.recent(t, taskLog(t), todayYmd(), 14);
+    const recent = isNew ? [] : t.kind === 'catchup'
+      ? taskLog(t).filter((l) => l.status !== 'skipped').sort((a, z) => a.occ.localeCompare(z.occ)).slice(-14).map((l) => ({ key: l.occ, d: l.occ.slice(0, 10), time: '', status: 'done' }))
+      : TK.recent(t, taskLog(t), todayYmd(), 14);
     const lastDone = isNew ? null : taskLog(t).filter((l) => l.status !== 'skipped').sort((a, z) => z.occ.localeCompare(a.occ))[0];
     sheet.innerHTML = `<form method="dialog" class="tk-sheet">
       <div class="tk-head"><span class="tk-icon">${kindMark(TASK_ICON[t.kind] || 'check', 'k-task')}</span>
@@ -660,15 +677,29 @@ import * as TK from './tasks.js';
         ${isNew ? '' : flame(st.current)}</div>
       ${isNew || !occ ? '' : `<div class="tk-main">
         ${done ? `<button type="button" class="btn ok big" data-tk="undo">✓ ${esc(TASK_MAIN[t.kind] || 'Done')} · Undo</button>` : `<button type="button" class="btn dark big" data-tk="done">${esc(TASK_MAIN[t.kind] || 'Done')}</button>`}
-        ${done ? '' : `<div class="btns2"><button type="button" class="btn ghost" data-tk="skip">${t.kind === 'med' ? 'Skip this dose' : `Skip${occ.future ? '' : ' this time'}`}</button>${t.nag ? '<button type="button" class="btn ghost" data-tk="snooze">Snooze 1h</button>' : ''}</div>`}
+        ${done ? '' : t.kind === 'catchup' ? '<div class="btns2"><button type="button" class="btn ghost" data-tk="snooze7">Not now (1 week)</button></div>' : `<div class="btns2"><button type="button" class="btn ghost" data-tk="skip">${t.kind === 'med' ? 'Skip this dose' : `Skip${occ.future ? '' : ' this time'}`}</button>${t.nag ? '<button type="button" class="btn ghost" data-tk="snooze">Snooze 1h</button>' : ''}</div>`}
       </div>`}
-      <div class="lbl">Details</div>
+      ${isPeople ? `<div class="lbl">Details</div>
+      <div class="tk-group">
+        <button type="button" class="tk-row tk-link" data-tk="person"><span>${kindMark('heart')} ${esc(person ? person.name : 'Person')}</span><span class="meta">Open ›</span></button>
+        ${t.kind === 'pdate' && details.label ? `<div class="tk-row"><span>Occasion</span><span class="meta">${esc(details.label)}</span></div>` : ''}
+        <label class="tk-row tk-in"><span>Notes</span><input name="notes" value="${esc(details.notes || '')}" maxlength="300" placeholder="Optional"></label>
+        <input type="hidden" name="title" value="${esc(t.title)}">
+      </div>
+      <div class="lbl">Schedule</div>
+      <div class="tk-group">
+        <div class="tk-row"><span>${kindMark('repeat')} ${t.kind === 'catchup' ? `Every ${esc(String(details.every || 30))} days` : `Every year on ${esc(parseDay(t.date).toLocaleDateString([], { month: 'long', day: 'numeric' }))}`}</span>
+          <span class="meta">${t.kind === 'catchup' ? `next ${esc(dayLabel(t.date))}` : ''}</span></div>
+        <button type="button" class="tk-row tk-link" data-tk="person"><span class="meta">Change it on ${esc(person ? person.name.split(' ')[0] : 'their')}'s page</span><span class="meta">›</span></button>
+        <input type="checkbox" name="has_date" checked hidden><input type="checkbox" name="has_time" hidden><select name="repeat" hidden><option value="${esc(t.repeat)}" selected></option></select><input name="date" value="${esc(t.date)}" hidden><input name="time" hidden>
+        <div class="tk-custom" data-tkshow="custom" hidden><div class="mpresets"></div><div class="mpanel"></div><p class="msum"></p></div>
+      </div>` : `<div class="lbl">Details</div>
       <div class="tk-group">
         <label class="tk-row tk-in"><span>Name</span><input name="title" value="${esc(t.title || '')}" required maxlength="120" placeholder="${{ habit: 'Workout', med: 'Vitamin D' }[t.kind] || 'Call the plumber'}"></label>
         ${t.kind === 'med' ? `<label class="tk-row tk-in"><span>Dose</span><input name="dose" value="${esc(details.dose || '')}" maxlength="60" placeholder="10 mg"></label>` : ''}
         <label class="tk-row tk-in"><span>Notes</span><input name="notes" value="${esc(details.notes || '')}" maxlength="300" placeholder="Optional"></label>
       </div>
-      <div class="lbl">Schedule</div>
+      `}${isPeople ? '' : `<div class="lbl">Schedule</div>
       <div class="tk-group">
         ${sw('has_date', !!t.date, `${kindMark('calendar')} Date`)}
         <label class="tk-row tk-sub" data-tkshow="date"><span>On</span><input type="date" name="date" value="${esc(t.date || todayYmd())}"></label>
@@ -676,7 +707,7 @@ import * as TK from './tasks.js';
         <label class="tk-row tk-sub" data-tkshow="time"><span>At</span><input type="time" name="time" value="${esc(t.time || '08:00')}"></label>
         <label class="tk-row" data-tkshow="date"><span>${kindMark('repeat')} Repeat</span><select name="repeat">${opt(TK.REPEATS, t.repeat || 'never')}</select></label>
         <div class="tk-custom" data-tkshow="custom"><div class="mpresets chips-wrap"></div><div class="mpanel"></div><p class="msum"></p></div>
-      </div>
+      </div>`}
       <div class="lbl">Reminders</div>
       <div class="tk-group">
         ${sw('nag', !!t.nag, 'Nag until done')}
@@ -701,7 +732,7 @@ import * as TK from './tasks.js';
       const vis = { date: has('has_date'), time: has('has_date') && has('has_time') && form.repeat.value !== 'custom', custom: has('has_date') && form.repeat.value === 'custom',
         nag: has('nag'), nagday: has('nag') && form.nag_mode.value === 'weekly', nagtime: has('nag') && form.nag_mode.value !== 'hourly' };
       form.querySelectorAll('[data-tkshow]').forEach((el) => { el.hidden = !vis[el.dataset.tkshow]; });
-      form.querySelector('label.tk-row:has([name="has_time"])').hidden = !vis.date || form.repeat.value === 'custom';
+      const tr = form.querySelector('label.tk-row:has([name="has_time"])'); if (tr) tr.hidden = !vis.date || form.repeat.value === 'custom';
     };
     const drawCustom = () => {
       const box = form.querySelector('.tk-custom');
@@ -716,9 +747,12 @@ import * as TK from './tasks.js';
     form.querySelectorAll('[data-tk]').forEach((b) => { b.onclick = async () => {
       const a = b.dataset.tk;
       try {
-        if (a === 'done' || a === 'skip') { sheet.close(); await taskDo(t, a === 'done' ? 'done' : 'skipped', occ); }
+        if (a === 'done' && t.kind === 'catchup') { sheet.close(); await api(`/api/people/${details.person_id}/contact`, { body: { how: 'talked' } }); await refresh(); toast(`Logged. Next catch-up ${dayLabel((taskById(t.id) || t).date)}`); }
+        else if (a === 'done' || a === 'skip') { sheet.close(); await taskDo(t, a === 'done' ? 'done' : 'skipped', occ); }
         else if (a === 'undo') { await taskDo(t, 'undo', occ); openTask(taskById(t.id)); }
         else if (a === 'snooze') { await api(`/api/tasks/${t.id}/snooze`, { body: { minutes: 60 } }); sheet.close(); await refresh(); toast('Snoozed 1 hour'); }
+        else if (a === 'snooze7') { await api(`/api/tasks/${t.id}/snooze`, { body: { minutes: 7 * 1440 } }); sheet.close(); await refresh(); toast('Reminders paused for a week'); }
+        else if (a === 'person') { if (person) openPerson(person); }
         else if (a === 'all') { const box = form.querySelector('.tk-all'); box.hidden = !box.hidden; }
         else if (a === 'remove') { if (!confirm(`Remove "${t.title}"? Its history is kept in backups.`)) return; await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Removed'); }
       } catch (err) { toast(err.message); }
@@ -2448,6 +2482,8 @@ import * as TK from './tasks.js';
       </div>
       ${p.id ? `<div id="p-extras"${inCircle(p) ? '' : ' hidden'}>${personExtras(p)}</div>
       <p class="sub" id="p-extras-hint" style="margin:0"${inCircle(p) ? ' hidden' : ''}>Set them as Family or Close friend to keep gift ideas and important dates.</p>` : ''}
+      ${p.id ? (() => { const ts = (data.tasks || []).filter((t) => PEOPLE_KINDS.includes(t.kind) && t.details && t.details.person_id === p.id);
+        return ts.length ? `<div class="lbl" style="font-size:13px;font-weight:600;color:var(--muted)">Reminders and streaks</div><div class="card no-when"><ul class="list">${ts.map((t) => `<li class="row"><button type="button" class="row-main" data-ptask="${t.id}"><div class="t">${esc(t.kind === 'birthday' ? 'Birthday' : t.kind === 'catchup' ? 'Catch up' : (t.details.label || t.title))}</div><div class="meta">${t.kind === 'catchup' ? `every ${t.details.every} days · next ${esc(dayLabel(t.date))}` : esc(parseDay(t.date).toLocaleDateString([], { month: 'long', day: 'numeric' }))}${t.nag ? ` · ${esc(TK.describeNag(t).toLowerCase())}` : ''}</div></button>${flame(streakOf(t).current)}</li>`).join('')}</ul></div>` : ''; })() : ''}
       <label class="inline"><input type="checkbox" name="bday_notify"${p.bday_notify !== 0 ? ' checked' : ''}> Show their birthday on Today and in my briefing</label>
       <label class="inline"><input type="checkbox" name="bday_remind"${p.bday_remind ? ' checked' : ''}> Remind me hourly on their birthday until I've wished them</label>
       <label class="field"><span>Notes</span><textarea name="notes">${esc(p.notes)}</textarea></label>
@@ -2458,6 +2494,7 @@ import * as TK from './tasks.js';
       </div>
     </form>`;
     const form = sheet.querySelector('form');
+    form.querySelectorAll('[data-ptask]').forEach((b) => { b.onclick = () => { const t = taskById(+b.dataset.ptask); if (t) openTask(t); }; });
     form.onsubmit = async (e) => {
       e.preventDefault();
       const f = new FormData(form);

@@ -1065,3 +1065,4 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 .tk-main .btns2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
 .tk-main .btns2 > .btn { width: 100%; justify-content: center; text-align: center; margin: 0; }
 .tk-main .btns2 > .btn:only-child { grid-column: 1 / -1; }
+.tk-link { width: 100%; background: none; border: 0; border-top: 1px solid var(--line); font: inherit; color: inherit; text-align: left; cursor: pointer; } .tk-group > .tk-link:first-child { border-top: 0; }
