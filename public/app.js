@@ -3,6 +3,7 @@ import { parseCapture } from './parse.js';
 import { parseVcards, birthdayEventPerson } from './vcard.js';
 import { medDueOn, describeSchedule, nextDue, WEEKDAY_NAMES, slotsOn, allTimes, fmtSlot, ORDINAL } from './meds.js';
 import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, monthsFor, minutesOf } from './home.js';
+import * as RW from './rewards.js';
 
 (() => {
   'use strict';
@@ -30,7 +31,7 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
   let weatherAt = 0;
   let needLogin = false; // only used for local development (online, Cloudflare Access is the sign-in)
   let loaded = false;
-  const ui = { allArea: 'all', peopleFilter: 'birthdays', peopleQuery: '', showDone: false, q: '', homeView: 'now', homeRoom: '', homeQ: '', mealWeek: 0 };
+  const ui = { rwTab: 'cards', rwWho: 'all', rwType: 'all', allArea: 'all', peopleFilter: 'birthdays', peopleQuery: '', showDone: false, q: '', homeView: 'now', homeRoom: '', homeQ: '', mealWeek: 0 };
   const CIRCLES = { family: 'Family', close: 'Close friend', friends: 'Friend' };
   const inCircle = (p) => p && (p.circle === 'family' || p.circle === 'close');
 
@@ -472,6 +473,7 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
 
     return `
       <header class="head">
+        <a class="gear" href="#settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></a>
         <h1>Good ${part}${name ? `, ${esc(name)}` : ''}</h1>
         <span class="summary">${esc(summary)}</span>
       </header>
@@ -485,6 +487,7 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
         ${nothingToday
           ? `<section>${head('Today', { key: 'rest' })}${isCol('rest') ? '' : `<div class="allclear">${synced ? 'Nothing else today. Enjoy it.' : 'Nothing yet. Calendar events appear once the Shortcut runs.'}</div>`}</section>`
           : section(`Today <span class="n">${rest.length}</span>`, rest, null, { key: 'rest' })}
+        ${(() => { const r = rwTodayRows(3); return r.length ? section(`Credits ending <span class="n">${r.length}</span>`, r, null, { key: 'rwsoon' }) : ''; })()}
         ${viewMeds()}
         ${viewHabits()}
         ${featured && featured.b.days === 0 ? bdayCard : ''}`)}
@@ -492,6 +495,7 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
         ${featured && featured.b.days > 0 ? bdayCard : ''}
         ${section(`This week <span class="n">${upcoming.length}</span>`, upcoming, null, { key: 'upcoming', add: 'go-meals', addLabel: 'Plan meals' })}
         ${viewHomeToday()}
+        ${(() => { const r = rwTodayRows(7, 3); return r.length ? section(`Credits this week <span class="n">${r.length}</span>`, r, null, { key: 'rwweek' }) : ''; })()}
         ${catchUp}`)}
       ${tgroup('Later', tripCard)}
       ${undated ? `<a class="link" href="#all">${plural(undated, 'task')} without a date ›</a>` : ''}
@@ -1534,7 +1538,7 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
     const s = data.settings;
     const hours = (sel) => Array.from({ length: 24 }, (_, h) => `<option value="${h}"${+sel === h ? ' selected' : ''}>${new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric' })}</option>`).join('');
     return `
-      <header class="head-row"><h1>Settings</h1></header>
+      <header class="head-row"><h1>Settings</h1><a class="link" href="#today">Done</a></header>
       <div class="jump" role="navigation" aria-label="Settings sections"><button type="button" data-act="jump" data-to="set-you">You</button><button type="button" data-act="jump" data-to="set-today">Today</button><button type="button" data-act="jump" data-to="set-calendar">Calendar & people</button><button type="button" data-act="jump" data-to="set-travel">Travel</button><button type="button" data-act="jump" data-to="set-account">Account</button></div>
       <h2 class="set-group" id="set-you">You</h2>
       <form class="setting" id="settings-form">
@@ -1639,11 +1643,344 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
     </form>`;
   }
 
+  // ---------- Rewards (credit cards, credits, certificates, points) ----------
+  // Logic lives in rewards.js (shared with the server). Cards are shared by the household;
+  // each belongs to one person.
+  const rwCtx = () => ({ ...(data.rewards || { cards: [], logs: [], points: {}, config: {} }), today: todayYmd() });
+  const rwCard = (id) => ((data.rewards || {}).cards || []).find((c) => c.id === id);
+  const rwBen = (c, id) => (c.benefits || []).find((b) => b.id === id);
+  const rwOwner = (c) => personName(c.owner);
+  const rwPeople = () => (data.users || []).map((u) => u.id);
+  const RW_ARTS = ['platinum', 'gold', 'graphite', 'palladium', 'brilliant', 'sapphire', 'freedom', 'ihg', 'discover', 'atmos', 'deltagold', 'venturex', 'prime', 'slate'];
+  const rwChip = (c, cls = '') => `<span class="rw-chip art-${RW_ARTS.includes(c.art) ? c.art : 'slate'} ${cls}" aria-hidden="true"><b>${esc(c.mark || '')}</b></span>`;
+  const rwDate = (d) => `${RW.MONTHS[d.getMonth()]} ${d.getDate()}`;
+  const rwDays = (n) => (n <= 1 ? 'last day' : `${n} days left`);
+  const rwPill = (v) => `<span class="rw-pill ${v.k}">${esc(v.label)}</span>`;
+  const RW_TABS = [['cards', 'Cards'], ['use', 'To use'], ['points', 'Points']];
+
+  function viewRewards() {
+    const tab = ui.rwTab || 'cards';
+    const body = tab === 'use' ? rwToUse() : tab === 'points' ? rwPoints() : rwCards();
+    return `<header class="head-row"><h1>Rewards</h1>${tab === 'cards' ? '<button type="button" class="sec-add" data-act="rw-add-card" aria-label="Add a card">+</button>' : ''}</header>
+      <div class="seg3" role="group" aria-label="Rewards view">${RW_TABS.map(([k, l]) => `<button type="button" data-act="rw-tab" data-v="${k}" aria-pressed="${tab === k}">${l}</button>`).join('')}</div>
+      ${body}`;
+  }
+
+  // Cards: the year at a glance, then each person's cards
+  function rwCards() {
+    const ctx = rwCtx(), y = startOfDay().getFullYear();
+    const ms = ctx.cards.map((c) => ({ c, m: RW.metrics(ctx, c, y) }));
+    if (!ms.length) return '<div class="allclear">No cards yet. Tap + to add one.</div>';
+    const sumOf = (list, f) => list.reduce((a, x) => a + f(x), 0);
+    const used = sumOf(ms, (x) => x.m.used), fees = sumOf(ms, (x) => x.m.fee), still = sumOf(ms, (x) => x.m.still);
+    const monthEnd = new Date(y, startOfDay().getMonth() + 1, 0);
+    const leftMonth = RW.openCredits(ctx).filter((x) => +x.info.end === +monthEnd).reduce((a, x) => a + x.left, 0);
+    const people = rwPeople();
+    const by = people.map((id) => { const g = ms.filter((x) => x.c.owner === id); return { id, used: sumOf(g, (x) => x.m.used), fee: sumOf(g, (x) => x.m.fee), g }; }).filter((p) => p.g.length);
+    const net = used - fees;
+    let h = `<section class="rw-hero">
+      <div class="rw-big"><span class="rw-num">${RW.money(Math.round(used))}</span><span>back in ${y}</span></div>
+      ${by.length > 1 ? `<div class="rw-split" role="img" aria-label="${by.map((p) => `${esc(personName(p.id))} ${RW.money(p.used)}`).join(', ')}">${by.map((p, i) => `<span class="p${i + 1}" style="width:${used > 0 ? (p.used / used) * 100 : 100 / by.length}%"></span>`).join('')}</div>
+        <div class="rw-legend">${by.map((p, i) => `<span><i class="p${i + 1}"></i>${esc(personName(p.id))} <b>${RW.money(Math.round(p.used))}</b></span>`).join('')}</div>` : ''}
+      <div class="rw-stats">
+        <div><small>Annual fees</small><b>${RW.money(fees)}</b></div>
+        <div><small>${net >= 0 ? 'Ahead by' : 'Behind by'}</small><b class="${net >= 0 ? 'ok' : 'late'}">${RW.money(Math.round(Math.abs(net)))}</b></div>
+        <button type="button" data-act="rw-tab" data-v="use"><small>Left this month</small><b class="${leftMonth > 0.004 ? 'late' : ''}">${RW.money(leftMonth)}</b></button>
+        <button type="button" data-act="rw-tab" data-v="use"><small>Left this year</small><b>${RW.money(Math.round(still))}</b></button>
+      </div>
+    </section>`;
+    for (const p of by) {
+      const g = p.g.sort((a, b) => (+b.c.fee || 0) - (+a.c.fee || 0) || String(a.c.name).localeCompare(b.c.name));
+      h += `<section><div class="sec-head"><h2>${esc(personName(p.id))}</h2><span class="rw-meta">${RW.money(Math.round(p.used))} back / ${RW.money(p.fee)} fees</span></div>
+        <div class="card"><ul class="list">${g.map(({ c, m }) => `<li class="row rw-card-row"><button type="button" class="row-main" data-act="rw-card" data-id="${esc(c.id)}">
+          ${rwChip(c)}<span class="rw-cmain"><span class="t">${esc(c.name)}</span><span class="meta">${esc(c.issuer || '')}${c.issuer ? ' · ' : ''}${m.fee ? `${RW.money(m.fee)} fee` : 'No fee'}</span></span>
+          <span class="rw-cside">${rwPill(m.verdict)}<span class="meta">${RW.money(m.used)}${m.fee ? ` / ${RW.money(m.fee)}` : ' back'}</span></span>
+          ${m.fee ? `<span class="rw-bar"><span class="${m.used >= m.fee ? 'good' : ''}" style="width:${Math.min(100, (m.used / m.fee) * 100)}%"></span></span>` : ''}
+        </button></li>`).join('')}</ul></div></section>`;
+    }
+    const fees4 = ctx.cards.map((c) => ({ c, d: RW.nextFee(ctx, c) })).filter((x) => x.d).sort((a, b) => a.d - b.d).slice(0, 4);
+    if (fees4.length) h += section('Upcoming fees', fees4.map(({ c, d }) => `<li class="row"><span class="when">${esc(rwDate(d))}</span>
+      <button type="button" class="row-main" data-act="rw-card" data-id="${esc(c.id)}"><div class="t">${esc(c.name)}</div><div class="meta">${esc(rwOwner(c))} · ${RW.money(c.fee)}${d.getFullYear() !== startOfDay().getFullYear() ? ` · ${d.getFullYear()}` : ''}</div></button></li>`));
+    return h;
+  }
+
+  function rwCredRow(x, { when = true } = {}) {
+    const { c, b, left, cap } = x;
+    return `<li class="row">${when ? `<span class="when">${esc(rwDate(x.info.end))}</span>` : ''}
+      <button type="button" class="check" data-act="rw-use-all" data-card="${esc(c.id)}" data-ben="${esc(b.id)}" aria-label="Mark ${esc(RW.money(left))} of ${esc(b.name)} used"></button>
+      <button type="button" class="row-main" data-act="rw-ben" data-card="${esc(c.id)}" data-ben="${esc(b.id)}">
+        <div class="t">${esc(b.name)} · ${esc(RW.money(left))}${left < cap - 0.004 ? ` <span class="rw-of">of ${esc(RW.money(cap))}</span>` : ''}</div>
+        <div class="meta">${esc(rwOwner(c))}'s ${esc(c.name)} · ${esc(rwDays(x.days))}</div></button></li>`;
+  }
+
+  // To use: every credit with money left, grouped by when it runs out; then certificates
+  function rwToUse() {
+    const ctx = rwCtx();
+    const open = RW.openCredits(ctx);
+    const dated = open.filter((x) => x.dated);
+    const byEnd = new Map();
+    for (const x of dated) { const k = RW.ymd(x.info.end); if (!byEnd.has(k)) byEnd.set(k, []); byEnd.get(k).push(x); }
+    const keys = [...byEnd.keys()].sort();
+    let h = '';
+    if (keys.length) {
+      const first = byEnd.get(keys[0]).reduce((a, x) => a + x.left, 0);
+      h += `<section class="rw-hero"><div class="rw-big"><span class="rw-num">${RW.money(first)}</span><span>left to use by ${esc(rwDate(RW.parseDate(keys[0])))}</span></div></section>`;
+    } else h += '<div class="allclear">Every credit is used. Nice.</div>';
+    for (const k of keys) {
+      const items = byEnd.get(k).sort((a, z) => z.left - a.left);
+      const d = RW.daysLeft(ctx, RW.parseDate(k));
+      h += section(`Ends ${esc(rwDate(RW.parseDate(k)))} <span class="n">${esc(rwDays(d))} · ${esc(RW.money(items.reduce((a, x) => a + x.left, 0)))}</span>`, items.map((x) => rwCredRow(x, { when: false })));
+    }
+    const yearly = open.filter((x) => !x.dated && x.b.period === 'anniversary');
+    if (yearly.length) h += section('Each card year', yearly.map((x) => rwCredRow(x, { when: false })));
+    const certs = RW.certList(ctx);
+    if (certs.length) h += section('Certificates', certs.map(({ c, b, x, days }) => { const pot = RW.certPot(x, b); return `<li class="row">
+      <button type="button" class="row-main" data-act="rw-ben" data-card="${esc(c.id)}" data-ben="${esc(b.id)}"><div class="t">${esc(b.name)}</div>
+      <div class="meta">${esc(rwOwner(c))}'s ${esc(c.name)}${pot ? ` · worth ~${esc(RW.money(pot))}` : ''} · ${x.expires ? `<span class="${days <= 30 ? 'late' : ''}">expires ${esc(rwDate(RW.parseDate(x.expires)))}</span>` : 'no expiry set'}</div></button></li>`; }));
+    const fours = open.filter((x) => x.b.period === '4yr');
+    if (fours.length) h += section('Every 4 years', fours.map((x) => rwCredRow(x, { when: false })));
+    return h;
+  }
+
+  // Points: balances by person, then where they can go
+  function rwPoints() {
+    const ctx = rwCtx(); const people = rwPeople();
+    const val = (o) => RW.progsFor(ctx, o).reduce((a, k) => { const c = RW.progCpp(ctx, k); return a + (c == null ? 0 : RW.bal(ctx, o, k) * c / 100); }, 0);
+    const cnt = (o) => RW.progsFor(ctx, o).reduce((a, k) => a + RW.bal(ctx, o, k), 0);
+    const total = people.reduce((a, o) => a + cnt(o), 0), tval = people.reduce((a, o) => a + val(o), 0);
+    let h = `<section class="rw-hero"><div class="rw-big"><span class="rw-num">${RW.fmtPts(total)}</span><span>points and miles</span></div>
+      <div class="rw-stats three">${people.map((o) => `<div><small>${esc(personName(o))}</small><b>${RW.fmtPts(cnt(o))}</b><small>≈ ${RW.money(Math.round(val(o)))}</small></div>`).join('')}<div><small>Worth about</small><b>${RW.money(Math.round(tval))}</b></div></div></section>`;
+    for (const o of people) {
+      const progs = RW.progsFor(ctx, o).sort((a, z) => RW.bal(ctx, o, z) - RW.bal(ctx, o, a));
+      const upd = (ctx.points[o] || {}).updated || {};
+      h += `<section>${head(esc(personName(o)), { add: 'rw-add-prog', addLabel: `Add a program for ${personName(o)}` }).replace('data-act="rw-add-prog"', `data-act="rw-add-prog" data-owner="${o}"`)}
+        <div class="card no-when"><ul class="list">${progs.map((k) => { const b = RW.bal(ctx, o, k), c = RW.progCpp(ctx, k);
+          return `<li class="row"><button type="button" class="row-main rw-pt" data-act="rw-bal" data-owner="${o}" data-prog="${esc(k)}">
+            <span><span class="t">${esc(RW.progName(ctx, k))}</span><span class="meta">${b ? (upd[k] ? `Updated ${esc(rwDate(RW.parseDate(upd[k])))}` : '') : 'Tap to add a balance'}</span></span>
+            <span class="rw-ptv"><b>${b ? RW.fmtPts(b) : '—'}</b>${b && c != null ? `<small>≈ ${RW.money(Math.round(b * c / 100))}</small>` : ''}</span></button></li>`; }).join('') || '<li class="row"><div class="row-main"><div class="meta">No programs yet</div></div></li>'}</ul></div></section>`;
+    }
+    // Transfer partners
+    const mode = ui.rwWho || 'all', type = ui.rwType || 'all';
+    const partners = ((ctx.config.transfers || {}).partners) || {};
+    const rows = [];
+    for (const [pid, pt] of Object.entries(partners)) {
+      if (type !== 'all' && pt.type !== type) continue;
+      let best;
+      if (mode === 'all') best = people.map((o) => RW.reachFor(ctx, o, pid, true, people)).sort((a, z) => z.total - a.total)[0];
+      else best = RW.reachFor(ctx, +mode, pid, false, people);
+      if (best && best.total > 0) rows.push({ pid, pt, ...best });
+    }
+    rows.sort((a, z) => z.total - a.total || a.pt.name.localeCompare(z.pt.name));
+    h += `<section><div class="sec-head"><h2>Transfer partners <span class="n">${rows.length}</span></h2></div>
+      <div class="seg3" role="group" aria-label="Whose points">${[['all', 'Together'], ...people.map((o) => [String(o), personName(o)])].map(([k, l]) => `<button type="button" data-act="rw-who" data-v="${k}" aria-pressed="${mode === k}">${esc(l)}</button>`).join('')}</div>
+      <div class="filters" style="margin-top:8px">${[['all', 'All'], ['air', 'Airlines'], ['hotel', 'Hotels']].map(([k, l]) => `<button type="button" data-act="rw-type" data-v="${k}" aria-pressed="${type === k}">${l}</button>`).join('')}</div>
+      ${rows.length ? `<div class="card no-when" style="margin-top:8px"><ul class="list">${rows.map((r) => {
+        const bon = r.parts.find((p) => p.bonus);
+        const line = r.parts.map((p) => (p.own ? `${RW.fmtK(p.amt)} already there` : `${mode === 'all' && p.q !== r.o ? `${esc(personName(p.q))}'s ` : ''}${RW.SRC_SHORT[p.src]} ${RW.fmtK(p.b)}${p.got !== p.b ? ` → ${RW.fmtK(p.got)}` : ''}`)).join(' + ');
+        const pc = RW.progCpp(ctx, r.pid);
+        return `<li class="row"><div class="row-main rw-xf"><div class="rw-xfh"><span class="t">${esc(r.pt.name)}</span><span class="rw-ptv"><b>${RW.fmtPts(r.total)}</b>${pc != null ? `<small>≈ ${RW.money(Math.round(r.total * pc / 100))}</small>` : ''}</span></div>
+          <div class="meta">${mode === 'all' ? `${esc(personName(r.o))}'s account · ` : ''}${line}</div>
+          ${bon ? `<span class="rw-bonus">+${bon.bonus.pct}% from ${RW.SRC_SHORT[bon.src]} until ${esc(rwDate(RW.parseDate(bon.bonus.end)))}</span>` : ''}</div></li>`; }).join('')}</ul></div>`
+        : '<div class="allclear">Add a Chase, Amex, Capital One or Bilt balance to see where it can go.</div>'}
+      <p class="hint">${mode === 'all' ? 'Together combines Chase and Capital One points into one account first; Amex and Bilt stay with whoever earned them. ' : ''}Values are conservative, about what a typical redemption gets. Partners as of ${esc((ctx.config.transfers || {}).asOf || '')}.</p></section>`;
+    return h;
+  }
+
+  // Credits ending soon, for Today (your own cards only)
+  function rwTodayRows(maxDays, minDays = 0) {
+    if (!data.rewards || !data.me) return [];
+    const ctx = rwCtx();
+    return RW.openCredits(ctx, ctx.cards.filter((c) => c.owner === data.me.id))
+      .filter((x) => x.dated && x.days <= maxDays && x.days > minDays).sort((a, z) => a.days - z.days || z.left - a.left)
+      .map((x) => rwCredRow(x));
+  }
+
+  // ----- Rewards sheets -----
+  async function rwLog(cardId, benId, amount, date, note) {
+    const r = await api('/api/rewards/logs', { body: { card_id: cardId, benefit_id: benId, amount, date, note } });
+    await refresh();
+    toast(`Logged ${RW.money(amount)}`, async () => { await api(`/api/rewards/logs/${r.id}`, { method: 'DELETE' }); await refresh(); });
+  }
+  async function rwPatch(c, patch) { await api(`/api/rewards/cards/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: patch }); await refresh(); }
+
+  function openRwCard(id, { edit = false } = {}) {
+    const c = rwCard(id); if (!c) return;
+    const ctx = rwCtx(), y = startOfDay().getFullYear(), m = RW.metrics(ctx, c, y);
+    const fee = RW.nextFee(ctx, c);
+    const benRow = (b) => {
+      let line = '';
+      if (b.kind === 'credit') { const u = RW.benUse(ctx, c, b, y); const p = u.cur;
+        const lf = p ? Math.max(0, p.cap - p.used) : 0;
+        line = `${RW.money(b.amount)} ${(RW.PERIOD_LABEL[b.period] || '').toLowerCase()}${p ? ` · ${lf > 0.004 ? `<span class="late">${RW.money(lf)} left</span>` : 'used'} ${p.info.label ? `(${esc(p.info.label)})` : ''}` : ''}`; }
+      else if (b.kind === 'cert') { const { cur } = RW.certState(ctx, c, b); line = !cur ? 'Used' : cur.next ? 'Next one at renewal' : cur.expires ? `Expires ${rwDate(RW.parseDate(cur.expires))}` : 'Not used yet'; }
+      else line = b.note || 'Perk';
+      return `<li class="row"><button type="button" class="row-main" data-rw="ben" data-ben="${esc(b.id)}"><div class="t">${esc(b.name)}</div><div class="meta">${line}</div></button></li>`;
+    };
+    const vis = RW.visibleBenefits(c);
+    sheet.innerHTML = `<form method="dialog" class="rw-sheet${edit ? ' editing' : ''}">
+      <div class="hview">
+        <div class="rw-shead">${rwChip(c, 'big')}<div><h3>${esc(c.name)}</h3><p class="sub">${esc(rwOwner(c))}'s card${c.issuer ? ` · ${esc(c.issuer)}` : ''}</p></div></div>
+        <div class="rw-stats">
+          <div><small>Back in ${y}</small><b>${RW.money(m.used)}</b></div>
+          <div><small>Annual fee</small><b>${m.fee ? RW.money(m.fee) : 'None'}</b></div>
+          <div><small>Status</small>${rwPill(m.verdict)}</div>
+        </div>
+        ${fee ? `<p class="rw-renew${RW.daysLeft(ctx, fee) <= 45 ? ' soon' : ''}">Fee of ${RW.money(c.fee)} renews ${esc(rwDate(fee))}${fee.getFullYear() !== y ? `, ${fee.getFullYear()}` : ''}${RW.daysLeft(ctx, fee) <= 45 ? ' · decide whether to keep it' : ''}</p>` : ''}
+        ${c.notes ? `<p class="hnotes">${esc(c.notes)}</p>` : ''}
+        <div class="lbl">Benefits</div>
+        <div class="card no-when"><ul class="list">${vis.map(benRow).join('') || '<li class="row"><div class="row-main"><div class="meta">No benefits tracked</div></div></li>'}</ul></div>
+        <div class="hmore"><button type="button" class="link" data-rw="edit">Edit card</button></div>
+      </div>
+      <div class="hedit">
+        <h3>Edit ${esc(c.name)}</h3>
+        <div class="two"><label class="field"><span>Name</span><input name="name" value="${esc(c.name)}" maxlength="80" required></label>
+          <label class="field"><span>Issuer</span><input name="issuer" value="${esc(c.issuer || '')}" maxlength="40"></label></div>
+        <div class="two"><label class="field"><span>Annual fee ($)</span><input name="fee" type="number" min="0" value="${esc(c.fee || 0)}"></label>
+          <label class="field"><span>Fee renews</span><input name="renews" type="date" value="${esc(c.renews || '')}"></label></div>
+        ${(data.users || []).length > 1 ? `<label class="field"><span>Whose card</span><select name="owner">${(data.users || []).map((u) => `<option value="${u.id}"${u.id === c.owner ? ' selected' : ''}>${esc(u.name)}</option>`).join('')}</select></label>` : ''}
+        <label class="field"><span>Notes</span><textarea name="notes">${esc(c.notes || '')}</textarea></label>
+        <div class="field"><span>Benefits you track (turn off ones you don't use)</span>
+          <div class="card no-when"><ul class="list">${(c.benefits || []).map((b) => `<li class="row"><label class="row-main rw-toggle"><span><span class="t">${esc(b.name)}</span><span class="meta">${b.kind === 'credit' ? `${RW.money(b.amount)} ${(RW.PERIOD_LABEL[b.period] || '').toLowerCase()}` : b.kind === 'cert' ? 'Certificate' : 'Perk'}</span></span><input type="checkbox" data-ben-on="${esc(b.id)}"${(c.hidden || []).includes(b.id) ? '' : ' checked'}></label></li>`).join('')}</ul></div></div>
+        <details class="rw-addben"><summary>+ Add a credit</summary>
+          <div class="two"><label class="field"><span>Name</span><input data-nb="name" placeholder="Uber Cash" maxlength="80"></label>
+            <label class="field"><span>Amount ($)</span><input data-nb="amount" type="number" min="0" step="0.01"></label></div>
+          <label class="field"><span>Resets</span><select data-nb="period">${['monthly', 'quarterly', 'semiannual', 'annual', 'anniversary'].map((p) => `<option value="${p}">${RW.PERIOD_LABEL[p]}</option>`).join('')}</select></label>
+        </details>
+        <div class="actions"><button type="button" class="btn danger" data-rw="remove">Remove card</button><span class="grow"></span>
+          <button type="button" class="btn ghost" data-rw="back">Back</button><button type="submit" class="btn dark">Save</button></div>
+      </div>
+    </form>`;
+    const form = sheet.querySelector('form');
+    form.querySelectorAll('[data-rw]').forEach((el) => { el.onclick = async () => {
+      const a = el.dataset.rw;
+      try {
+        if (a === 'ben') openRwBenefit(c.id, el.dataset.ben);
+        else if (a === 'edit') { form.classList.add('editing'); sheet.scrollTop = 0; }
+        else if (a === 'back') form.classList.remove('editing');
+        else if (a === 'remove') { if (!confirm(`Remove ${c.name} and its history?`)) return; await api(`/api/rewards/cards/${encodeURIComponent(c.id)}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Card removed'); }
+      } catch (err) { toast(err.message); }
+    }; });
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(form);
+      const hidden = [...form.querySelectorAll('[data-ben-on]')].filter((x) => !x.checked).map((x) => x.dataset.benOn);
+      const patch = { name: f.get('name'), issuer: f.get('issuer'), fee: +f.get('fee') || 0, renews: f.get('renews') || null, notes: f.get('notes'), hidden };
+      if (f.has('owner')) patch.owner = +f.get('owner');
+      const nb = (k) => form.querySelector(`[data-nb="${k}"]`).value.trim();
+      if (nb('name') && +nb('amount') > 0) {
+        const bid = `${nb('name').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30)}-${Math.random().toString(36).slice(2, 5)}`;
+        patch.benefits = [...(c.benefits || []), { id: bid, kind: 'credit', name: nb('name'), amount: +nb('amount'), period: nb('period') }];
+      }
+      try { await rwPatch(c, patch); toast('Saved'); openRwCard(c.id); } catch (err) { toast(err.message); }
+    };
+    showSheet();
+  }
+
+  function openRwBenefit(cardId, benId) {
+    const c = rwCard(cardId); const b = c && rwBen(c, benId); if (!b) return;
+    const ctx = rwCtx(), y = startOfDay().getFullYear();
+    const u = RW.benUse(ctx, c, b, y); const p = u.cur;
+    const left = p ? Math.max(0, p.cap - p.used) : 0;
+    const snoozed = p && RW.isSnoozed(c, b, p.info);
+    const back = p ? new Date(p.info.end.getFullYear(), p.info.end.getMonth(), p.info.end.getDate() + 1) : null;
+    let body = '';
+    if (b.kind === 'credit') {
+      body = `${p ? `<div class="rw-meter"><div class="rw-mbig"><b>${RW.money(left)}</b> left of ${RW.money(p.cap)}</div>
+          <span class="rw-bar"><span class="good" style="width:${p.cap ? Math.min(100, (p.used / p.cap) * 100) : 0}%"></span></span>
+          <div class="meta">${esc(p.info.label || '')}${p.info.end ? ` · ${esc(rwDays(RW.daysLeft(ctx, p.info.end)))}` : ''}</div></div>` : ''}
+        <div class="two"><label class="field"><span>Amount used ($)</span><input name="amount" type="number" min="0.01" step="0.01" value="${left ? Math.round(left * 100) / 100 : ''}" required></label>
+          <label class="field"><span>Date</span><input name="date" type="date" value="${todayYmd()}" max="${todayYmd()}" required></label></div>
+        <label class="field"><span>Note (optional)</span><input name="note" maxlength="200" placeholder="Disney+ bill"></label>
+        <div class="btns"><button type="submit" class="btn dark">Log it</button></div>
+        ${p && left > 0.004 ? `<button type="button" class="link" data-rwb="snooze">${snoozed ? 'Show it on To use again' : `Hide until ${esc(rwDate(back))} (not using it this time)`}</button>` : ''}
+        ${u.mine.length ? `<div class="lbl">This year</div><div class="card no-when"><ul class="list">${u.mine.slice().sort((a, z) => String(z.date || '').localeCompare(String(a.date || ''))).map((l) => `<li class="row"><div class="row-main"><div class="t">${RW.money(l.amount)}${l.kind === 'ytd' ? ' (year total)' : ''}</div><div class="meta">${l.date ? esc(rwDate(RW.parseDate(l.date))) : ''}${l.note ? ` · ${esc(l.note)}` : ''}</div></div><button type="button" class="pbtn icon" data-rwdel="${esc(l.id)}" aria-label="Delete this entry">×</button></li>`).join('')}</ul></div>` : ''}`;
+    } else if (b.kind === 'cert') {
+      const { cur, past } = RW.certState(ctx, c, b);
+      body = cur && !cur.next ? `<div class="two"><label class="field"><span>Expires</span><input name="expires" type="date" value="${esc(cur.expires || '')}"></label>
+          <label class="field"><span>Worth about ($)</span><input name="potential" type="number" min="0" value="${esc(RW.certPot(cur, b) || '')}"></label></div>
+          <div class="btns"><button type="button" class="btn ghost" data-rwb="cert-save">Save</button><button type="button" class="btn dark" data-rwb="cert-used">Mark used</button></div>`
+        : `<p class="sub">${cur && cur.next ? 'Used. The next one arrives at renewal.' : 'Used.'}</p>`;
+      if (past.length) body += `<div class="lbl">Earlier</div><p class="meta">${past.map((x) => `${x.used ? 'Used' : 'Expired'}${x.expires ? ` (${esc(rwDate(RW.parseDate(x.expires)))})` : ''}`).join(' · ')}</p>`;
+    } else body = `<p class="sub">${esc(b.note || 'A perk with nothing to track.')}</p>`;
+    sheet.innerHTML = `<form method="dialog" class="rw-sheet">
+      <div class="rw-shead">${rwChip(c)}<div><h3>${esc(b.name)}</h3><p class="sub">${esc(rwOwner(c))}'s ${esc(c.name)}${b.kind === 'credit' ? ` · ${RW.money(b.amount)} ${(RW.PERIOD_LABEL[b.period] || '').toLowerCase()}` : ''}</p></div></div>
+      ${b.note ? `<p class="hnotes">${esc(b.note)}</p>` : ''}
+      ${body}
+      <div class="actions"><button type="button" class="btn ghost" data-rwb="card">${esc(c.name)} ›</button><span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Close</button></div>
+    </form>`;
+    const form = sheet.querySelector('form');
+    form.querySelector('[data-sheet="close"]').onclick = () => sheet.close();
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      if (b.kind !== 'credit') return;
+      const f = new FormData(form);
+      try { await rwLog(c.id, b.id, +f.get('amount'), f.get('date'), f.get('note').trim()); openRwBenefit(c.id, b.id); } catch (err) { toast(err.message); }
+    };
+    form.querySelectorAll('[data-rwb]').forEach((el) => { el.onclick = async () => {
+      const a = el.dataset.rwb;
+      try {
+        if (a === 'card') openRwCard(c.id);
+        else if (a === 'snooze') { const sn = { ...(c.snoozed || {}) }; if (snoozed) delete sn[b.id]; else sn[b.id] = p.info.key; await rwPatch(c, { snoozed: sn }); sheet.close(); toast(snoozed ? 'Back on To use' : `Hidden until ${rwDate(back)}`); }
+        else if (a === 'cert-save' || a === 'cert-used') {
+          const { cur } = RW.certState(ctx, c, b);
+          const entry = { ...(cur && !cur.virtual ? cur : { id: Math.random().toString(36).slice(2, 10), benId: b.id, at: Date.now() }),
+            expires: form.expires.value || '', potential: +form.potential.value || 0, used: a === 'cert-used' };
+          const certs = (c.certs || []).filter((x) => x.id !== entry.id).concat(entry);
+          await rwPatch(c, { certs }); openRwBenefit(c.id, b.id); toast(a === 'cert-used' ? 'Marked used' : 'Saved');
+        }
+      } catch (err) { toast(err.message); }
+    }; });
+    form.querySelectorAll('[data-rwdel]').forEach((el) => { el.onclick = async () => {
+      try { await api(`/api/rewards/logs/${el.dataset.rwdel}`, { method: 'DELETE' }); await refresh(); openRwBenefit(c.id, b.id); toast('Entry deleted'); } catch (err) { toast(err.message); }
+    }; });
+    showSheet();
+  }
+
+  function openRwBalance(owner, prog) {
+    const ctx = rwCtx(); const b = prog ? RW.bal(ctx, owner, prog) : 0;
+    const known = Object.entries(((ctx.config.transfers || {}).partners) || {}).map(([k, v]) => [k, v.name]);
+    const srcs = RW.SRC.map((k) => [k, RW.progName(ctx, k)]);
+    sheet.innerHTML = `<form method="dialog">
+      <h3>${prog ? esc(RW.progName(ctx, prog)) : 'Add a program'}</h3>
+      <p class="sub">${esc(personName(owner))}'s balance${prog && ((ctx.points[owner] || {}).updated || {})[prog] ? ` · updated ${esc(rwDate(RW.parseDate(ctx.points[owner].updated[prog])))}` : ''}</p>
+      ${prog ? '' : `<label class="field"><span>Program</span><select name="prog">${[...srcs, ...known].map(([k, n]) => `<option value="${esc(k)}">${esc(n)}</option>`).join('')}</select></label>`}
+      <label class="field"><span>Points (you can type 66.8k or 1.2m)</span><input name="bal" inputmode="decimal" value="${b || ''}" placeholder="0"></label>
+      <div class="actions">${prog ? '<button type="button" class="btn danger" data-rwp="remove">Remove</button>' : ''}<span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Cancel</button><button type="submit" class="btn dark">Save</button></div>
+    </form>`;
+    const form = sheet.querySelector('form');
+    form.querySelector('[data-sheet="close"]').onclick = () => sheet.close();
+    const save = async (n) => { await api('/api/rewards/points', { body: { user: owner, program: prog || form.prog.value, balance: n } }); sheet.close(); await refresh(); toast('Saved'); };
+    form.onsubmit = async (e) => { e.preventDefault(); const n = RW.parsePts(form.bal.value); if (Number.isNaN(n)) { toast('Enter a number like 66819 or 66.8k'); return; } try { await save(n); } catch (err) { toast(err.message); } };
+    const rm = form.querySelector('[data-rwp="remove"]'); if (rm) rm.onclick = () => save(0).catch((err) => toast(err.message));
+    showSheet();
+  }
+
+  function openRwAddCard() {
+    sheet.innerHTML = `<form method="dialog">
+      <h3>Add a card</h3>
+      ${(data.users || []).length > 1 ? `<label class="field"><span>Whose card</span><select name="owner">${(data.users || []).map((u) => `<option value="${u.id}"${data.me && u.id === data.me.id ? ' selected' : ''}>${esc(u.name)}</option>`).join('')}</select></label>` : ''}
+      <div class="two"><label class="field"><span>Card name</span><input name="name" required maxlength="80" placeholder="Sapphire Reserve"></label>
+        <label class="field"><span>Issuer</span><input name="issuer" maxlength="40" placeholder="Chase"></label></div>
+      <div class="two"><label class="field"><span>Annual fee ($)</span><input name="fee" type="number" min="0" value="0"></label>
+        <label class="field"><span>Fee renews</span><input name="renews" type="date"></label></div>
+      <label class="field"><span>Earns</span><select name="currency">${Object.entries(RW.CURRENCY).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></label>
+      <p class="sub">After saving, open the card and tap Edit card to add its credits.</p>
+      <div class="actions"><span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Cancel</button><button type="submit" class="btn dark">Add card</button></div>
+    </form>`;
+    const form = sheet.querySelector('form');
+    form.querySelector('[data-sheet="close"]').onclick = () => sheet.close();
+    form.onsubmit = async (e) => {
+      e.preventDefault(); const f = new FormData(form);
+      try { const r = await api('/api/rewards/cards', { body: Object.fromEntries(f) }); await refresh(); openRwCard(r.id, { edit: true }); toast('Card added'); } catch (err) { toast(err.message); }
+    };
+    showSheet();
+  }
+
   // ---------- render ----------
 
   function currentView() {
     const h = location.hash.replace('#', '');
-    return ['today', 'all', 'home', 'people', 'settings', 'meals'].includes(h) ? h : 'today';
+    return ['today', 'all', 'home', 'people', 'rewards', 'settings', 'meals'].includes(h) ? h : 'today';
   }
 
   function render() {
@@ -1653,10 +1990,10 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
     const v = currentView();
     capForm.hidden = v === 'settings';
     parsedEl.hidden = v === 'settings';
-    nav.querySelectorAll('a').forEach((a) => a.setAttribute('aria-current', a.getAttribute('href') === `#${v === 'meals' ? 'today' : v}` ? 'page' : 'false'));
+    nav.querySelectorAll('a').forEach((a) => a.setAttribute('aria-current', a.getAttribute('href') === `#${v === 'meals' || v === 'settings' ? 'today' : v}` ? 'page' : 'false'));
     const focusId = document.activeElement && document.activeElement.id;
     const caret = document.activeElement && document.activeElement.selectionStart;
-    app.innerHTML = { today: viewToday, all: viewAll, home: viewHome, people: viewPeople, settings: viewSettings, meals: viewMeals }[v]();
+    app.innerHTML = { today: viewToday, all: viewAll, home: viewHome, people: viewPeople, rewards: viewRewards, settings: viewSettings, meals: viewMeals }[v]();
     renderFocusOverlay();
     if (focusId === 'psearch' || focusId === 'allsearch' || focusId === 'hsearch') { const el = document.getElementById(focusId); if (el) { el.focus(); el.setSelectionRange(caret, caret); } }
   }
@@ -2172,6 +2509,20 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
     if (!el) return;
     const id = +el.dataset.id;
     const act = el.dataset.act;
+    if (act === 'rw-tab') { ui.rwTab = el.dataset.v; render(); window.scrollTo(0, 0); return; }
+    if (act === 'rw-who') { ui.rwWho = el.dataset.v; render(); return; }
+    if (act === 'rw-type') { ui.rwType = el.dataset.v; render(); return; }
+    if (act === 'rw-card') { openRwCard(el.dataset.id); return; }
+    if (act === 'rw-ben') { openRwBenefit(el.dataset.card, el.dataset.ben); return; }
+    if (act === 'rw-bal') { openRwBalance(+el.dataset.owner, el.dataset.prog); return; }
+    if (act === 'rw-add-prog') { openRwBalance(+el.dataset.owner, null); return; }
+    if (act === 'rw-add-card') { openRwAddCard(); return; }
+    if (act === 'rw-use-all') {
+      const c = rwCard(el.dataset.card), b = c && rwBen(c, el.dataset.ben);
+      const p = b && RW.benUse(rwCtx(), c, b, startOfDay().getFullYear()).cur;
+      if (p) { (el.closest('.row') || el).classList.add('completing'); rwLog(c.id, b.id, Math.round((p.cap - p.used) * 100) / 100, todayYmd(), '').catch((err) => toast(err.message)); }
+      return;
+    }
     if (act === 'backup') {
       (async () => {
         const res = await fetch('/api/backup', { headers: token ? { authorization: `Bearer ${token}` } : {} });

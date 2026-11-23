@@ -6,6 +6,7 @@ import { parseVcards, birthdayEventPerson } from '../public/vcard.js';
 import { slotsOn } from '../public/meds.js';
 import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS } from '../public/home.js';
 import { sendWebPush } from './webpush.js';
+import * as RW from '../public/rewards.js';
 
 const ITEM_FIELDS = ['title', 'notes', 'area', 'kind', 'due_at', 'nag', 'repeat_days', 'top3', 'person_id', 'status', 'snooze_until', 'shared'];
 const PERSON_FIELDS = ['name', 'birthday', 'phone', 'email', 'notes', 'checkin_days', 'last_contact_at', 'last_contact_how', 'bday_remind', 'bday_notify', 'circle'];
@@ -389,7 +390,7 @@ async function handleApi(req, env, url, ctx, uid) {
     const evs = events.results.map((e) => ({ ...e, ...eventKeys(e), pref: eventPref(e, prefs, settings) }));
     return json({ items: items.results, people: people.results, events: evs, event_prefs: eventPrefs.results, trips: trips.results, documents: documents.results,
       habits: habits.results, habit_logs: habitLogs.results, gifts: gifts.results, person_dates: personDates.results, meds: meds.results, med_logs: medLogs.results, home_tasks: homeTasks.results, home_log: homeLog.results, meals: meals.results, meal_titles: mealTitles.results, settings, tz: env.TZ || 'America/Chicago', auth: env.ACCESS_AUD ? 'access' : 'password',
-      me, users: users.map((u) => ({ id: u.id, name: u.name })),
+      me, users: users.map((u) => ({ id: u.id, name: u.name })), rewards: await loadRewards(env),
       push: { public_key: env.VAPID_PUBLIC || '', devices: (await env.DB.prepare('SELECT device, created_at, last_ok_at, last_error, endpoint FROM push_subs WHERE user_id = ?').bind(uid).all()).results } });
   }
 
@@ -718,6 +719,80 @@ async function handleApi(req, env, url, ctx, uid) {
     delete out.weather_cache;
     return json(out);
   }
+  // ---------- Rewards (shared by the household) ----------
+  if (path === '/api/rewards/logs' && method === 'POST') {
+    const b = body || {};
+    const card = await rwCard(env, b.card_id);
+    const ben = card && (card.benefits || []).find((x) => x.id === b.benefit_id);
+    const amount = Math.round(+b.amount * 100) / 100;
+    if (!ben || !(amount > 0) || amount > 100000) return json({ error: 'card, benefit and amount required' }, 400);
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : localParts(new Date(), env.TZ || 'America/Chicago').date;
+    const info = RW.periodInfo(ben.period, RW.parseDate(date), card);
+    const id = `l${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    await env.DB.prepare('INSERT INTO rw_logs (id, card_id, benefit_id, year, period, kind, amount, date, note, by_user, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, card.id, ben.id, +date.slice(0, 4), info.key, 'use', amount, date, b.note ? String(b.note).slice(0, 200) : null, uid, nowIso()).run();
+    return json({ ok: true, id }, 201);
+  }
+  if ((m = /^\/api\/rewards\/logs\/([\w-]+)$/.exec(path)) && method === 'DELETE') {
+    await env.DB.prepare('DELETE FROM rw_logs WHERE id = ?').bind(m[1]).run();
+    return json({ ok: true });
+  }
+  // Card changes: snoozes, certificates, benefit on/off, fee and dates, notes
+  if ((m = /^\/api\/rewards\/cards\/([\w-]+)$/.exec(path)) && method === 'PATCH') {
+    const card = await rwCard(env, m[1]);
+    if (!card) return notYours();
+    const b = body || {};
+    const next = { ...card };
+    delete next.id; delete next.owner;
+    const str = (v, n) => (v ? String(v).slice(0, n) : null);
+    const dateOk = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : null);
+    if ('name' in b) next.name = str(b.name, 80) || card.name;
+    if ('issuer' in b) next.issuer = str(b.issuer, 40);
+    if ('fee' in b) next.fee = Math.max(0, Math.round(+b.fee || 0));
+    if ('renews' in b) next.renews = dateOk(b.renews);
+    if ('opened' in b) next.opened = dateOk(b.opened);
+    if ('notes' in b) next.notes = str(b.notes, 1000);
+    if ('hidden' in b && Array.isArray(b.hidden)) next.hidden = b.hidden.map(String).slice(0, 60);
+    if ('snoozed' in b && b.snoozed && typeof b.snoozed === 'object') next.snoozed = Object.fromEntries(Object.entries(b.snoozed).filter(([, v]) => v).map(([k, v]) => [String(k), String(v)]));
+    if ('certs' in b && Array.isArray(b.certs)) next.certs = b.certs.slice(0, 40).map((x) => ({ id: str(x.id, 20) || Math.random().toString(36).slice(2, 10), benId: str(x.benId, 60),
+      expires: dateOk(x.expires) || '', potential: x.potential == null ? null : +x.potential || 0, used: !!x.used, note: str(x.note, 200) || '', at: +x.at || Date.now() }));
+    if ('benefits' in b && Array.isArray(b.benefits)) next.benefits = b.benefits.slice(0, 60).map((x) => ({ ...x, id: str(x.id, 60), name: str(x.name, 80), amount: x.amount == null ? undefined : +x.amount || 0 }));
+    let owner = card.owner;
+    if ('owner' in b && (await env.DB.prepare('SELECT 1 FROM users WHERE id = ?').bind(+b.owner).first())) owner = +b.owner;
+    await env.DB.prepare('UPDATE rw_cards SET data = ?, owner = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(next), owner, nowIso(), card.id).run();
+    return json({ ok: true });
+  }
+  if (path === '/api/rewards/cards' && method === 'POST') {
+    const b = body || {};
+    const name = String(b.name || '').trim().slice(0, 80);
+    if (!name) return json({ error: 'Card name required' }, 400);
+    const owner = (await env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(+b.owner || uid).first()) ? (+b.owner || uid) : uid;
+    const id = `u${owner}-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}-${Math.random().toString(36).slice(2, 6)}`;
+    const data = { name, issuer: b.issuer ? String(b.issuer).slice(0, 40) : '', mark: String(b.issuer || name).slice(0, 5).toUpperCase(), art: 'slate',
+      fee: Math.max(0, Math.round(+b.fee || 0)), renews: /^\d{4}-\d{2}-\d{2}$/.test(b.renews || '') ? b.renews : null, currency: b.currency || 'CASH', benefits: [], hidden: [], certs: [] };
+    await env.DB.prepare('INSERT INTO rw_cards (id, owner, data, updated_at) VALUES (?, ?, ?, ?)').bind(id, owner, JSON.stringify(data), nowIso()).run();
+    return json({ ok: true, id }, 201);
+  }
+  if ((m = /^\/api\/rewards\/cards\/([\w-]+)$/.exec(path)) && method === 'DELETE') {
+    await env.DB.batch([env.DB.prepare('DELETE FROM rw_cards WHERE id = ?').bind(m[1]), env.DB.prepare('DELETE FROM rw_logs WHERE card_id = ?').bind(m[1])]);
+    return json({ ok: true });
+  }
+  // Point balances: { user, program, balance } (0 removes it)
+  if (path === '/api/rewards/points' && method === 'POST') {
+    const b = body || {};
+    const who = +b.user || uid;
+    if (!(await env.DB.prepare('SELECT 1 FROM users WHERE id = ?').bind(who).first())) return json({ error: 'unknown person' }, 400);
+    const prog = String(b.program || '').slice(0, 40);
+    const n = Math.max(0, Math.round(+b.balance || 0));
+    if (!/^[\w-]+$/.test(prog)) return json({ error: 'program required' }, 400);
+    const row = await env.DB.prepare('SELECT * FROM rw_points WHERE user_id = ?').bind(who).first();
+    const balances = row ? JSON.parse(row.balances) : {}, updated = row ? JSON.parse(row.updated) : {};
+    if (n > 0) { balances[prog] = n; updated[prog] = localParts(new Date(), env.TZ || 'America/Chicago').date; } else { delete balances[prog]; delete updated[prog]; }
+    await env.DB.prepare(`INSERT INTO rw_points (user_id, balances, updated) VALUES (?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET balances = excluded.balances, updated = excluded.updated`).bind(who, JSON.stringify(balances), JSON.stringify(updated)).run();
+    return json({ ok: true });
+  }
+
   // Backup: everything that's yours plus the shared household data, as one JSON file.
   if (path === '/api/backup' && method === 'GET') {
     const all = async (sql, ...args) => (await env.DB.prepare(sql).bind(...args).all()).results;
@@ -1072,6 +1147,7 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
   await ensurePeopleReminders(env, tz, local, uid);
   report.sent.push(...await sendMedReminders(env, tz, local, quiet, now, uid));
   report.sent.push(...await sendHomeReminders(env, tz, local, quiet, now, uid));
+  report.sent.push(...await sendRewardsReminders(env, tz, local, now, uid));
   const wrapHour = s.wrap_hour === '' || s.wrap_hour === undefined ? 21 : +s.wrap_hour;
   if (wrapHour >= 0 && local.h === wrapHour && s.last_wrap !== local.date) {
     await sendWrapUp(env, tz, local, uid);
@@ -1143,6 +1219,71 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
     if (ok) await markSent([item]);
   }
   return report;
+}
+
+// ---------- Rewards reminders ----------
+// For each person's own cards:
+//  - one morning notification (at their briefing hour or later) listing credits that run out within 3 days
+//  - a "keep or cancel?" task 30 days before an annual fee renews (daily nag until done)
+//  - a "use it" task 30 days before a certificate expires (daily nag until done)
+async function sendRewardsReminders(env, tz, local, now, uid) {
+  const rw = await loadRewards(env);
+  const mine = rw.cards.filter((c) => c.owner === uid);
+  if (!mine.length) return [];
+  const ctx = { ...rw, today: local.date };
+  const sent = [];
+  const s = await getSettings(env, uid);
+  const key = `rw:${uid}:${local.date}`;
+  if (local.h >= Math.max(8, +s.briefing_hour || 8) && !(await env.DB.prepare('SELECT 1 FROM home_nags WHERE key = ?').bind(key).first())) {
+    const soon = RW.openCredits(ctx, mine).filter((x) => x.dated && x.days <= 3).sort((a, z) => a.days - z.days || z.left - a.left);
+    if (soon.length) {
+      const total = soon.reduce((a, x) => a + x.left, 0);
+      const ok = await push(env, { to: uid, tag: 'rw-credits', priority: 4, click: `${env.PUBLIC_URL}/#rewards`,
+        title: `${soon.length} credit${soon.length > 1 ? 's' : ''} ending soon · ${RW.money(total)} left`,
+        message: soon.slice(0, 4).map((x) => `${x.b.name} ${RW.money(x.left)} (${x.c.name})`).join(', ') + (soon.length > 4 ? ` +${soon.length - 4} more` : '') });
+      if (ok) sent.push(key);
+    }
+    await env.DB.prepare('INSERT INTO home_nags (key, last_at) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').bind(key, now.toISOString()).run();
+  }
+  const nine = zonedToUtc(local.y, local.m, local.d, 9, 0, tz).toISOString();
+  const stmts = [];
+  for (const c of mine) {
+    const fee = RW.nextFee(ctx, c);
+    if (fee && RW.daysLeft(ctx, fee) <= 31) {
+      const when = `${RW.MONTHS[fee.getMonth()]} ${fee.getDate()}`;
+      stmts.push(env.DB.prepare(`INSERT OR IGNORE INTO items (title, notes, area, due_at, nag, source, external_id, user_id)
+        VALUES (?, ?, NULL, ?, 'daily', 'rewards', ?, ?)`).bind(`Keep or cancel ${c.name}? ${RW.money(c.fee)} fee on ${when}`,
+        `Value back this year: ${RW.money(RW.metrics(ctx, c, local.y).used)}. Downgrade or cancel before ${when} if it's not worth it.`, nine, `rwfee:${c.id}:${RW.ymd(fee)}`, uid));
+    }
+    for (const { b, x, days } of RW.certList(ctx, [c])) {
+      if (!x.expires || x.virtual || days > 30 || days < 0) continue;
+      stmts.push(env.DB.prepare(`INSERT OR IGNORE INTO items (title, notes, area, due_at, nag, source, external_id, user_id)
+        VALUES (?, ?, 'travel', ?, 'daily', 'rewards', ?, ?)`).bind(`Use your ${b.name} (${c.name})`, `Expires ${x.expires}. Mark it used in Rewards once it's booked.`, nine, `rwcert:${c.id}:${x.id}`, uid));
+    }
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  return sent;
+}
+
+// ---------- Rewards helpers ----------
+async function loadRewards(env) {
+  const [cards, logs, pts, cfg] = await Promise.all([
+    env.DB.prepare('SELECT * FROM rw_cards').all(),
+    env.DB.prepare("SELECT id, card_id, benefit_id, year, period, kind, amount, date, note FROM rw_logs WHERE year >= CAST(strftime('%Y', 'now') AS INTEGER) - 1").all(),
+    env.DB.prepare('SELECT * FROM rw_points').all(),
+    env.DB.prepare('SELECT * FROM rw_config').all(),
+  ]).catch(() => [{ results: [] }, { results: [] }, { results: [] }, { results: [] }]);
+  const config = Object.fromEntries(cfg.results.map((r) => [r.key, JSON.parse(r.value)]));
+  return {
+    cards: cards.results.map((r) => ({ ...JSON.parse(r.data), id: r.id, owner: r.owner })),
+    logs: logs.results,
+    points: Object.fromEntries(pts.results.map((r) => [r.user_id, { balances: JSON.parse(r.balances), updated: JSON.parse(r.updated) }])),
+    config,
+  };
+}
+async function rwCard(env, id) {
+  const r = await env.DB.prepare('SELECT * FROM rw_cards WHERE id = ?').bind(String(id || '')).first();
+  return r ? { ...JSON.parse(r.data), id: r.id, owner: r.owner } : null;
 }
 
 // Once a month: a "Download a Life backup" task (done automatically when you download one).
@@ -1360,6 +1501,12 @@ async function sendBriefing(env, tz, local, uid = 1) {
   if (dinner) lines.push(dinner.kind === 'cook' ? `Dinner: ${dinner.title}` : dinner.kind === 'out' ? `Dinner: out${dinner.title ? ` (${dinner.title})` : ''}` : dinner.kind === 'leftovers' ? 'Dinner: leftovers' : 'No dinner plan needed tonight');
   const homeLine = await homeSummary(env, local.date);
   if (homeLine) lines.push(homeLine);
+  const rw = await loadRewards(env);
+  const myCards = rw.cards.filter((c) => c.owner === uid);
+  if (myCards.length) {
+    const open = RW.openCredits({ ...rw, today: local.date }, myCards).filter((x) => x.dated && x.days <= 7);
+    if (open.length) lines.push(`Credits: ${RW.money(open.reduce((a, x) => a + x.left, 0))} left this week (${open.length})`);
+  }
   for (const p of people.results) {
     if (p.bday_notify === 0) continue; // you chose not to hear about this birthday
     const d = daysUntilBirthday(p.birthday, local);
