@@ -1,7 +1,7 @@
 # Life Dashboard: setup guide
 
 The app is a Cloudflare Worker (free plan). It has a small database, runs a check every
-15 minutes, and sends notifications to your iPhone through the free **ntfy** app.
+15 minutes, and sends its own notifications to your iPhone (Web Push from the Home Screen app).
 
 Node.js is installed at `~/.local/node`. In Terminal, run this once per window before
 the commands below:
@@ -23,14 +23,9 @@ The local database holds test data only.
 
 ## 2. Get notifications on your iPhone
 
-1. Install **ntfy** from the App Store.
-2. Tap **+** and subscribe to your topic. Use the `NTFY_TOPIC` value from `.dev.vars`,
-   or make a new one: any long random name works, e.g. `life-` followed by 24 random letters.
-3. Allow notifications when iOS asks.
-
-> Privacy note: on the free public ntfy.sh server, anyone who knows your topic name can
-> read its notifications. That's why the name is long and random: keep it to yourself.
-> Notifications show task titles, not your calendar or contact details.
+1. Open Life from its **Home Screen icon** (iPhone only allows notifications there, not in Safari).
+2. Go to **Settings › Notifications › Turn on notifications** and allow them when iOS asks.
+3. Do this on each phone. Tapping a notification opens Life.
 
 ## 3. Put it online (Cloudflare, free)
 
@@ -47,19 +42,13 @@ The local database holds test data only.
    ```bash
    npm run db:remote
    ```
-5. Set your two secrets. Pick a strong password for APP_TOKEN, and use your ntfy topic name:
+5. Set your secrets: a strong password for APP_TOKEN, and the private half of the Web Push
+   key pair (its public half is VAPID_PUBLIC in `wrangler.toml`):
    ```bash
    npx wrangler secret put APP_TOKEN
    ```
    ```bash
-   npx wrangler secret put NTFY_TOPIC
-   ```
-   Also add an ntfy access token (strongly recommended). Without one, ntfy.sh counts limits
-   against Cloudflare's shared outgoing IP addresses, which other apps use up, and it then
-   silently stops pushing to iPhones. Create a free account at ntfy.sh, go to Account ›
-   Access tokens › Create, then paste the token here:
-   ```bash
-   npx wrangler secret put NTFY_TOKEN
+   npx wrangler secret put VAPID_PRIVATE_JWK
    ```
 6. Deploy:
    ```bash
@@ -67,7 +56,7 @@ The local database holds test data only.
    ```
    It prints your URL, like `https://life-dashboard.<your-name>.workers.dev`.
 7. Put that URL into `PUBLIC_URL` in `wrangler.toml`, then run `npm run deploy` again.
-   The Done and Snooze buttons on notifications need this.
+   Tapping a notification opens this URL.
 8. On your iPhone, open the URL in Safari. Tap **Share › Add to Home Screen**, then sign
    in with your APP_TOKEN.
 

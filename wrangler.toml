@@ -22,9 +22,7 @@ crons = ["*/15 * * * *"]
 
 [vars]
 TZ = "America/Chicago"
-NTFY_SERVER = "https://ntfy.sh"
-# Set to your deployed URL (e.g. https://life-dashboard.<you>.workers.dev) so
-# Done/Snooze buttons on notifications can reach the app.
+# Your deployed URL (e.g. https://life-dashboard.<you>.workers.dev); tapping a notification opens it.
 PUBLIC_URL = "https://life-dashboard.lifedash-dxuk.workers.dev"
 # Cloudflare Access gate (the app double-checks Access's signed token).
 # Leave ACCESS_AUD empty in .dev.vars for local development.
@@ -36,7 +34,7 @@ ACCESS_AUD = "e171cb05241f7b07be71f1c03567266ba8b8877b4dbc76f89da446f1b4687779"
 
 # Secrets (never put these in this file):
 #   APP_TOKEN  - your password for the app and for Shortcuts
-#   NTFY_TOPIC - a long random topic name for your phone to subscribe to
+#   VAPID_PRIVATE_JWK - private half of the Web Push key pair (Life's own notifications)
 # Local dev: put them in .dev.vars. Production: `npx wrangler secret put APP_TOKEN`.
 
 [dev]

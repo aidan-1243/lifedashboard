@@ -208,7 +208,7 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
   email TEXT UNIQUE,              -- the Cloudflare Access sign-in email
   name TEXT,
-  ntfy_topic TEXT,                -- this person's ntfy topic (user 1 falls back to the NTFY_TOPIC secret)
+  ntfy_topic TEXT,                -- old; dropped by migrations/2026-11-25-drop-ntfy.sql
   service_token TEXT UNIQUE       -- Access service token Client ID for this person's Shortcuts (optional)
 );
 INSERT OR IGNORE INTO users (id, email, name) VALUES (1, 'aidan.mccoy6@gmail.com', 'Aidan');

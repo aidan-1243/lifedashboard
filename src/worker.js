@@ -1,5 +1,5 @@
-// Life Dashboard — Cloudflare Worker: JSON API, notification actions, and the
-// 15-minute cron that sends nags and the morning briefing through ntfy.
+// Life Dashboard — Cloudflare Worker: JSON API and the 15-minute cron that sends nags and
+// the morning briefing as Life's own notifications (Web Push).
 
 import { parseCapture } from '../public/parse.js';
 import { parseVcards, birthdayEventPerson } from '../public/vcard.js';
@@ -56,7 +56,7 @@ export default {
     const out = new Response(res.body, res); // copy so headers are editable
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) out.headers.set(k, v);
     const path = new URL(req.url).pathname;
-    if (path.startsWith('/api/') || path.startsWith('/a/')) out.headers.set('Cache-Control', 'no-store');
+    if (path.startsWith('/api/')) out.headers.set('Cache-Control', 'no-store');
     return out;
   },
   async scheduled(_event, env, ctx) {
@@ -67,12 +67,11 @@ export default {
 async function route(req, env, ctx) {
   const url = new URL(req.url);
   try {
-    const guarded = url.pathname.startsWith('/api/') || url.pathname.startsWith('/a/');
+    const guarded = url.pathname.startsWith('/api/');
     const ip = req.headers.get('cf-connecting-ip') || 'local';
     if (guarded && (await recentFailures(env, ip)) >= MAX_FAILURES) {
       return json({ error: `Too many wrong attempts. Try again in ${FAILURE_WINDOW_MIN} minutes.` }, 429);
     }
-    if (url.pathname.startsWith('/a/')) return await handleAction(req, env, url, ip);
     // Everything except notification buttons must have passed the Cloudflare Access gate.
     const who = await verifyAccess(req, env);
     if (!who) return new Response('Forbidden', { status: 403 });
@@ -167,7 +166,7 @@ async function userFor(req, env, who) {
   return u ? u.id : 1;
 }
 async function listUsers(env) {
-  return (await env.DB.prepare('SELECT id, name, ntfy_topic FROM users ORDER BY id').all()).results;
+  return (await env.DB.prepare('SELECT id, name FROM users ORDER BY id').all()).results;
 }
 // Is this row yours? Tasks also count when they're shared.
 async function owns(env, table, id, uid) {
@@ -235,14 +234,6 @@ function daysUntilBirthday(bday, today) {
   let next = Date.UTC(today.y, +m[1] - 1, +m[2]);
   if (next < t) next = Date.UTC(today.y + 1, +m[1] - 1, +m[2]);
   return Math.round((next - t) / 86400000);
-}
-
-async function sign(env, text) {
-  const secret = env.LINK_KEY || env.APP_TOKEN;
-  if (!secret) throw new Error('LINK_KEY is not set');
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(text));
-  return [...new Uint8Array(sig)].slice(0, 16).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 // Settings are per person, except the household ones below. User 1's are stored under
@@ -323,29 +314,6 @@ async function snoozeItem(env, id, minutes) {
   return updateRow(env, 'items', id, { snooze_until: new Date(Date.now() + minutes * 60000).toISOString() });
 }
 
-async function snoozeTomorrow(env, id) {
-  const tz = env.TZ || 'America/Chicago';
-  const p = localParts(new Date(Date.now() + 86400000), tz);
-  return updateRow(env, 'items', id, { snooze_until: zonedToUtc(p.y, p.m, p.d, 9, 0, tz).toISOString() });
-}
-
-// ---------- notification action links (Done / Snooze buttons) ----------
-
-async function handleAction(req, env, url, ip) {
-  const m = /^\/a\/(\d+)\/(done|snooze|tomorrow)$/.exec(url.pathname);
-  if (!m) return new Response('Not found', { status: 404 });
-  const [, id, action] = m;
-  if (url.searchParams.get('sig') !== (await sign(env, `${id}:${action}`))) {
-    await recordFailure(env, ip);
-    return new Response('Bad link', { status: 403 });
-  }
-  if (action === 'done') await completeItem(env, +id);
-  if (action === 'snooze') await snoozeItem(env, +id, 60);
-  if (action === 'tomorrow') await snoozeTomorrow(env, +id);
-  const msg = { done: 'Marked done.', snooze: 'Snoozed for 1 hour.', tomorrow: 'Snoozed until tomorrow 9am.' }[action];
-  return new Response(msg, { headers: { 'content-type': 'text/plain' } });
-}
-
 // ---------- API ----------
 
 async function handleApi(req, env, url, ctx, uid) {
@@ -377,7 +345,7 @@ async function handleApi(req, env, url, ctx, uid) {
     delete settings.weather_cache;
     const users = await listUsers(env);
     const meRow = users.find((u) => u.id === uid) || { id: uid };
-    const me = { id: uid, name: meRow.name, ntfy_topic: meRow.ntfy_topic || (uid === 1 ? env.NTFY_TOPIC || '' : '') };
+    const me = { id: uid, name: meRow.name };
     const prefs = Object.fromEntries(eventPrefs.results.map((r) => [r.key, r]));
     const evs = events.results.map((e) => ({ ...e, ...eventKeys(e), pref: eventPref(e, prefs, settings) }));
     return json({ items: items.results, people: people.results, events: evs, event_prefs: eventPrefs.results, trips: trips.results, documents: documents.results,
@@ -1036,22 +1004,17 @@ async function importVcards(env, text, uid = 1) {
   return importContacts(env, parseVcards(text), uid);
 }
 
-// ---------- push (ntfy) ----------
+// ---------- push (Life's own notifications) ----------
 
-// Send a notification through ntfy. Failures are logged and remembered (Settings shows
-// the last one) instead of disappearing silently.
+// Send to every phone / browser where this person turned on notifications (Settings).
+// Failures are remembered (Settings shows the last one) instead of disappearing silently.
 let lastPushError = null;
-// `to` is the person (user id) whose phone gets it; each person has their own ntfy topic.
-async function topicFor(env, uid) {
-  const u = await env.DB.prepare('SELECT ntfy_topic FROM users WHERE id = ?').bind(uid).first();
-  return (u && u.ntfy_topic) || (uid === 1 ? env.NTFY_TOPIC : null);
-}
-// Each person's phones get Life's own notifications (Web Push) once they've turned them on in
-// Settings; until then, ntfy is used as before.
 async function push(env, opts) {
   const { results: subs } = await env.DB.prepare('SELECT * FROM push_subs WHERE user_id = ?').bind(opts.to || 1).all();
   if (subs.length && env.VAPID_PRIVATE_JWK) return pushWeb(env, subs, opts);
-  return pushNtfy(env, opts);
+  lastPushError = 'Notifications are not turned on for this person (Settings › Notifications)';
+  console.error('push skipped:', opts.title, lastPushError);
+  return false;
 }
 
 async function pushWeb(env, subs, { title, message, priority = 3, click, tag }) {
@@ -1072,36 +1035,6 @@ async function pushWeb(env, subs, { title, message, priority = 3, click, tag }) 
   await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('last_push_error', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
     .bind(`${nowIso()} · ${title} · ${lastPushError}`).run().catch(() => {});
   return false;
-}
-
-async function pushNtfy(env, { to = 1, title, message, actions, priority = 3, tags, click }) {
-  const topic = await topicFor(env, to);
-  if (!topic) { lastPushError = 'No ntfy topic is set for this person'; return false; }
-  try {
-    // With an ntfy account token, rate limits count against your account instead of
-    // Cloudflare's shared outgoing IP addresses (which other apps exhaust).
-    const headers = { 'content-type': 'application/json' };
-    if (env.NTFY_TOKEN) headers.authorization = `Bearer ${env.NTFY_TOKEN}`;
-    const res = await fetch(env.NTFY_SERVER || 'https://ntfy.sh', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ topic, title, message, priority, tags, actions, click: click || env.PUBLIC_URL }),
-    });
-    if (res.ok) { lastPushError = null; return true; }
-    const body = (await res.text().catch(() => '')).slice(0, 200);
-    lastPushError = `ntfy ${res.status}: ${body}`;
-  } catch (err) {
-    lastPushError = `ntfy unreachable: ${String(err && err.message || err).slice(0, 150)}`;
-  }
-  console.error('push failed:', title, lastPushError);
-  await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('last_push_error', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-    .bind(`${new Date().toISOString()} · ${title} · ${lastPushError}`).run().catch(() => {});
-  return false;
-}
-
-async function actionButton(env, id, action, label) {
-  const url = `${env.PUBLIC_URL}/a/${id}/${action}?sig=${await sign(env, `${id}:${action}`)}`;
-  return { action: 'http', label, url, method: 'POST', clear: true };
 }
 
 // ---------- cron: nags + morning briefing ----------
@@ -1213,9 +1146,6 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
       title: item.title,
       message: [AREA_LABEL[item.area], isBooking ? 'from Wayfare' : null, whenText(item)].filter(Boolean).join(' · ') + repeating,
       priority: item.nag === 'once' ? 3 : 4,
-      // Done / Snooze buttons only show through ntfy (Life's own notifications open the app instead)
-      actions: [await actionButton(env, item.id, 'done', isBooking ? 'Booked' : 'Done'),
-        await actionButton(env, item.id, item.nag === 'daily' || isBooking ? 'tomorrow' : 'snooze', item.nag === 'daily' || isBooking ? 'Tomorrow' : 'Snooze 1h')],
     });
     if (ok) await markSent([item]);
   }
@@ -1579,7 +1509,6 @@ async function sendWrapUp(env, tz, local, uid = 1) {
   else lines.push('Nothing left over. Nice.');
   if (habits.n) lines.push(`Habits: ${habitDone.n} of ${habits.n}`);
   await push(env, { to: uid, title: 'Evening wrap-up', message: lines.join('\n'), priority: 2 });
-  // ntfy opens the app's main page; the app shows the wrap-up card in the evening.
 }
 
 // Nights this week (Sunday through Saturday, from today on) with no meal plan

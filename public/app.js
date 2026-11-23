@@ -231,8 +231,7 @@ import * as TK from './tasks.js';
     else if (!pushSupported()) html = `<p>This browser can't show Life's notifications.${devices.length ? ` They're on for ${devices.length} other device${devices.length > 1 ? 's' : ''}.` : ''}</p>`;
     else if (typeof Notification !== 'undefined' && Notification.permission === 'denied') html = `<p>Notifications are blocked for Life. On iPhone: <b>Settings › Notifications › Life</b>, turn on Allow Notifications, then reopen Life.</p>`;
     else html = `<p>Get reminders straight from Life: reliable, private, and tapping one opens the app.${devices.length ? ` Already on for ${devices.length} other device${devices.length > 1 ? 's' : ''}.` : ''}</p><div class="btns"><button type="button" class="btn dark" data-act="push-on">Turn on notifications</button></div>`;
-    if (!devices.length && data.me && data.me.ntfy_topic) html += `<p class="hint">Until then, reminders go through the ntfy app (topic <b class="sel">${esc(data.me.ntfy_topic)}</b>).</p>`;
-    else if (devices.length) html += `<p class="hint">ntfy is no longer used for you, so you can delete the ntfy app.${onHere ? ' <button type="button" class="link" data-act="push-off">Turn off on this device</button>' : ''}</p>`;
+    if (onHere) html += `<p class="hint"><button type="button" class="link" data-act="push-off">Turn off on this device</button></p>`;
     return html;
   }
   // Must start from the tap itself: iPhone only asks for permission during a user gesture.
