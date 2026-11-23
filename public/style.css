@@ -1073,3 +1073,13 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 .tk-progress { height: 6px; border-radius: 4px; background: var(--soft); overflow: hidden; margin-top: 2px; }
 .tk-progress span { display: block; height: 100%; background: var(--ok); border-radius: 4px; }
 .tk-done summary { cursor: pointer; font-weight: 600; color: var(--muted); padding: 8px 4px; }
+/* ---------- Today: one list ---------- */
+.trow .tcheck { order: 3; margin-left: 4px; }
+.trow .tx { flex: none; width: 32px; height: 32px; border-radius: 50%; border: 0; background: var(--soft); color: var(--muted); font-size: 18px; line-height: 1; }
+.late-row .when .late { font-size: 12px; font-weight: 700; }
+.tdim { color: var(--muted); font-weight: 500; font-size: 14px; }
+.k-event { background: var(--a-hoa-bg); color: var(--a-hoa); }
+.k-task { background: var(--soft); color: var(--muted); }
+.k-habit { background: var(--a-home-bg); color: var(--a-home); }
+.tday + .tday { margin-top: 12px; }
+.tday-h { display: block; border: 0; background: none; padding: 2px 4px 6px; font: inherit; font-size: 14px; font-weight: 700; color: var(--muted); cursor: pointer; }

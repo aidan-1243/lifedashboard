@@ -385,59 +385,93 @@ import * as TK from './tasks.js';
         <span>${weekday(d0)}</span><strong>${d0.getDate()}</strong><i class="${bday ? 'bday' : busy ? 'on' : ''}"></i></button></div>`;
     }).join('');
 
-    // needs you now
-    let nowCard = '';
-    if (overdue.length) {
-      const top = overdue[0];
-      const booking = top.source === 'wayfare';
-      nowCard = `<section class="now" aria-label="Needs you now">
-        <span class="label">Needs you now</span>
-        <div>
-          <button type="button" class="title" data-act="edit" data-id="${top.id}">${esc(top.title)}</button>
-          <div class="sub">${top.area ? `<span class="chip ${areaClass(top.area)}">${AREAS[top.area]}</span>` : ''}
-            <span>${esc(overdueText(top.due_at))}${isNagging(top) ? ` · I'll keep reminding you ${{ '15m': 'every 15 minutes', hourly: 'hourly', daily: 'daily' }[top.nag]}` : ''}</span></div>
-        </div>
-        <div class="btns2">
-          <button type="button" class="btn dark" data-act="done" data-id="${top.id}">${booking ? 'Booked' : 'Mark done'}</button>
-          <button type="button" class="btn" data-act="snooze" data-id="${top.id}">Later</button>
-        </div>
-        ${overdue.length > 1 ? `<div class="more">${overdue.slice(1, 5).map((i) => `<button type="button" data-act="edit" data-id="${i.id}"><span>${esc(i.title)}</span><span class="late">${esc(overdueText(i.due_at).replace('overdue ', ''))}</span></button>`).join('')}</div>` : ''}
-      </section>`;
+    // ---------- one list: every kind of task as the same kind of row ----------
+    // Today: late first, then things with no time, then by the clock. The rest of the week: by day,
+    // same order inside each day. Each row: time · icon · title/detail · check (or × for all-day events).
+    const trow = ({ when = '', icon, cls = '', title, meta = '', open, done, dismiss, late = false }) => `<li class="row trow${late ? ' late-row' : ''}">
+      <span class="when">${late ? '<span class="late">Late</span>' : esc(when)}</span>${kindMark(icon, cls)}
+      <button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
+      ${done ? `<button type="button" class="check tcheck" ${done.attrs} aria-label="${esc(done.label)}"></button>` : ''}
+      ${dismiss ? `<button type="button" class="tx" ${dismiss} aria-label="Hide for today">×</button>` : ''}</li>`;
+    const at = (d, hhmm) => { const [hh, mm] = hhmm.split(':').map(Number); const x = parseDay(d); x.setHours(hh, mm, 0, 0); return +x; };
+    const KIND_ORDER = { late: 0, birthday: 1, pdate: 2, credit: 3, event: 4, home: 5, habit: 6, item: 7 };
+    const itemIcon = (i) => (i.trip_id || i.source === 'wayfare' ? ['suitcase', 'k-trip'] : ['check', 'k-task']);
+    const homeTasks = (data.home_tasks || []).map((t) => ({ t, i: homeInfo(t) })).filter((x) => !x.i.completed && !x.i.snoozed);
+    const myCreditsOpen = (() => { if (!data.rewards || !data.me) return []; const ctx = rwCtx(); return RW.openCredits(ctx, ctx.cards.filter((c) => c.owner === data.me.id)).filter((x) => x.dated); })();
+    const peopleTasks = (data.tasks || []).filter((t) => (t.kind === 'birthday' || t.kind === 'pdate') && !t.archived);
+
+    function entriesFor(D, isToday) {
+      const d0 = parseDay(D), d1 = new Date(+d0 + DAY);
+      const out = [];
+      // Calendar events (finished ones drop off Today)
+      for (const e of eventsOn(d0, d1)) {
+        if (isToday && !e.all_day && new Date(e.end_at || e.start_at) <= now) continue;
+        if (!isToday && new Date(e.start_at) < d0) continue; // multi-day events show on their first day
+        const keep = (data.event_prefs || []).find((r) => r.key === e.one) || {};
+        out.push({ k: 'event', at: e.all_day ? null : Date.parse(e.start_at), html: trow({ when: e.all_day ? '' : fmtShortTime(e.start_at), icon: 'calendar', cls: 'k-event', title: esc(e.title),
+          meta: [e.all_day ? 'All day' : `${esc(fmtTime(e.start_at))}${e.end_at ? `–${esc(fmtTime(e.end_at))}` : ''}`, e.location ? esc(e.location) : '', e.pref && e.pref.note ? esc(e.pref.note) : ''].filter(Boolean).join(' · '),
+          open: `data-act="event" data-id="${e.id}"`, dismiss: e.all_day && isToday ? `data-act="ev-hide" data-key="${esc(e.one)}" data-keep='${esc(JSON.stringify({ note: keep.note || null, label: keep.label || e.title }))}'` : null }) });
+      }
+      // Tasks due this day (overdue ones are in Today's late block)
+      for (const i of open.filter((x) => x.due_at && new Date(x.due_at) >= d0 && new Date(x.due_at) < d1 && !overdueIds.has(x.id))) {
+        const timed = hasTime(i.due_at); const [ic, cl] = itemIcon(i);
+        out.push({ k: 'item', at: timed ? Date.parse(i.due_at) : null, html: trow({ when: timed ? fmtShortTime(i.due_at) : '', icon: ic, cls: cl, title: esc(i.title), meta: itemMeta(i, { skipDue: true }),
+          open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `Done: ${i.title}` } }) });
+      }
+      // Medications: today every dose still to take; later days only the non-daily ones
+      if (isToday) for (const x of medSlotsToday().filter((x) => !x.log)) {
+        out.push({ k: 'med', at: +x.at, html: trow({ when: fmtShortTime(x.at.toISOString()), icon: 'pill', cls: 'k-med', title: `${esc(x.med.name)}${x.med.dose ? ` <span class="tdim">${esc(x.med.dose)}</span>` : ''}`,
+          meta: x.at < now ? '<span class="late">Due now</span>' : `Medication · ${esc(fmtTime(x.at.toISOString()))}`, open: `data-act="med-open" data-id="${x.med.id}"`, done: { attrs: `data-act="med-take" data-id="${x.med.id}" data-slot="${x.slot}"`, label: `Taken: ${x.med.name}` } }) });
+      } else for (const m of (data.meds || []).filter((m) => !((m.freq || 'daily') === 'daily' && (+m.interval_n || 1) === 1))) {
+        for (const slot of slotsOn(m, D)) out.push({ k: 'med', at: at(D, slot), html: trow({ when: fmtSlot(slot), icon: 'pill', cls: 'k-med', title: esc(m.name), meta: `Medication · ${esc(describeSchedule(m).split(' · ')[0])}`, open: `data-act="med-open" data-id="${m.id}"` }) });
+      }
+      // Habits: today only
+      if (isToday) for (const t of myHabits().filter((t) => TK.isDueOn(t, D))) {
+        const o = taskOcc(t); if (o && !o.future && o.log) continue;
+        const s = streakOf(t).current;
+        out.push({ k: 'habit', at: t.time ? at(D, t.time) : null, html: trow({ when: t.time ? fmtSlot(t.time) : '', icon: 'check', cls: 'k-habit', title: esc(t.title), meta: `Habit${s ? ` · ${s} 🔥` : ''}`,
+          open: `data-act="task-open" data-id="${t.id}"`, done: { attrs: `data-act="habit" data-id="${t.id}"`, label: `Done: ${t.title}` } }) });
+      }
+      // Home: due this day (overdue ones are in Today's late block)
+      for (const { t, i } of homeTasks.filter((x) => x.i.due === D && x.i.k >= 0)) {
+        out.push({ k: 'home', at: null, html: trow({ icon: 'home', cls: 'k-home', title: esc(t.name), meta: `Home · ${esc(t.room || '')}${t.est ? ` · ${esc(t.est)}` : ''}`,
+          open: `data-act="home-open" data-id="${t.id}"`, done: { attrs: `data-act="home-done" data-id="${t.id}"`, label: `Done: ${t.name}` } }) });
+      }
+      // Birthdays and important dates (checked off = gone)
+      for (const t of peopleTasks.filter((t) => TK.isDueOn(t, D))) {
+        if (taskLog(t).some((l) => l.occ === D)) continue;
+        const yrs = /^\d{4}/.test(t.date) && !t.date.startsWith('2000') ? +D.slice(0, 4) - +t.date.slice(0, 4) : null;
+        out.push({ k: t.kind, at: null, html: trow({ icon: t.kind === 'birthday' ? 'balloon' : 'heart', cls: 'k-people', title: esc(t.title),
+          meta: t.kind === 'birthday' ? `Birthday${yrs ? ` · turns ${yrs}` : ''}` : `Important date${yrs ? ` · ${yrs} years` : ''}`,
+          open: `data-act="task-open" data-id="${t.id}"`, done: isToday ? { attrs: `data-act="task-done" data-id="${t.id}" data-occ="${D}"`, label: t.kind === 'birthday' ? `Wished them: ${t.title}` : `Done: ${t.title}` } : null }) });
+      }
+      // Credits: on the day they run out
+      for (const x of myCreditsOpen.filter((x) => RW.ymd(x.info.end) === D)) {
+        out.push({ k: 'credit', at: null, html: trow({ icon: 'card', cls: 'k-credit', title: `${esc(x.b.name)} · ${esc(RW.money(x.left))}`, meta: `Credit ends · ${esc(x.c.name)}`,
+          open: `data-act="rw-ben" data-card="${esc(x.c.id)}" data-ben="${esc(x.b.id)}"`, done: isToday ? { attrs: `data-act="rw-use-all" data-card="${esc(x.c.id)}" data-ben="${esc(x.b.id)}"`, label: `Used: ${x.b.name}` } : null }) });
+      }
+      // Dinner (cooking only) at 5pm; tonight's drops off once eaten or after 7pm
+      const ml = (data.meals || []).find((x) => x.date === D);
+      if (ml && ml.kind === 'cook' && !(isToday && (ml.eaten || now.getHours() >= 19))) {
+        out.push({ k: 'meal', at: at(D, '17:00'), html: trow({ when: '5p', icon: 'fork', cls: 'k-meal', title: `Dinner: ${esc(ml.title)}`, meta: ml.notes ? esc(ml.notes) : 'Dinner',
+          open: `data-act="meal-open" data-date="${D}"`, done: isToday ? { attrs: `data-act="meal-ate" data-date="${D}"`, label: 'We ate' } : null }) });
+      }
+      // No time first (birthdays, dates, credits, all-day events, Home, habits, tasks), then by the clock
+      return out.sort((x, y) => (x.at === null) !== (y.at === null) ? (x.at === null ? -1 : 1)
+        : x.at === null ? (KIND_ORDER[x.k] ?? 9) - (KIND_ORDER[y.k] ?? 9) : x.at - y.at).map((x) => x.html);
     }
 
-    // featured birthday (soonest within a week)
-    const bdays = data.people.filter((p) => p.bday_notify !== 0).map((p) => ({ p, b: birthdayIn(p.birthday) })).filter((x) => x.b && x.b.days <= 14).sort((a, b) => a.b.days - b.b.days);
-    // Heads-up card ahead of time only for family / close friends (gift planning); everyone else on the day itself.
-    const featured = bdays.find((x) => x.b.days === 0 || (inCircle(x.p) && x.b.days <= 7));
-    let bdayCard = '';
-    if (featured) {
-      const { p, b } = featured;
-      const when = b.days === 0 ? 'today' : b.days === 1 ? 'tomorrow' : weekday(b.date, 'long');
-      const first = p.name.split(' ')[0];
-      const sub = [b.turns ? `Turns ${b.turns}` : '', (p.notes || '').split('\n')[0].slice(0, 60)].filter(Boolean).join(' · ') || 'Tap to see details';
-      bdayCard = `<button type="button" class="feature" data-act="person" data-id="${p.id}">
-        <span class="avatar lg a-people">${esc(initials(p.name))}</span>
-        <span style="flex:1;min-width:0"><span class="t">${esc(first)}'s birthday is ${esc(when)}</span><span class="s">${esc(sub)}</span></span>
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="8" width="18" height="13" rx="2"/><path d="M12 8v13M3 12h18M12 8S10 3 7.5 4.5 9 8 12 8zm0 0s2-5 4.5-3.5S15 8 12 8z"/></svg>
-      </button>`;
-    }
-
-    // rest of today
-    const todayItems = open.filter((i) => !overdueIds.has(i.id) && i.due_at && new Date(i.due_at) >= sod && new Date(i.due_at) < eod);
-    const top3 = open.filter((i) => i.top3 && !overdueIds.has(i.id) && !todayItems.includes(i)).slice(0, 3);
-    const rest = [
-      ...top3.map((i) => ({ at: -1, html: itemRow(i, { when: '' }) })),
-      ...todayEvents.map((e) => ({ at: e.all_day ? 0 : Date.parse(e.start_at), html: eventRow(e, { when: e.all_day ? 'All day' : fmtShortTime(e.start_at), meta: eventMeta(e, now) }) })),
-      ...todayItems.map((i) => ({ at: Date.parse(i.due_at), html: itemRow(i, { when: hasTime(i.due_at) ? fmtShortTime(i.due_at) : '', skipDue: true }) })),
-      ...(() => {
-        const ml = (data.meals || []).find((x) => x.date === ymd(sod));
-        if (!ml || ml.kind !== 'cook' || ml.eaten || now.getHours() >= 19) return [];
-        const at = new Date(sod); at.setHours(18, 0, 0, 0);
-        return [{ at: +at, html: `<li class="row"><span class="when"></span>${kindMark('fork', 'k-people')}
-          <button type="button" class="row-main" data-act="meal-open" data-date="${ml.date}"><div class="t">Dinner: ${esc(ml.title)}</div>${ml.notes ? `<div class="meta">${esc(ml.notes)}</div>` : ''}</button>
-          <button type="button" class="pbtn" data-act="meal-ate" data-date="${ml.date}" aria-label="We already ate. Hide dinner">Ate ✓</button></li>` }];
-      })(),
-    ].sort((a, b) => a.at - b.at).map((x) => x.html);
+    // Today's late block: overdue tasks (nagging ones first), then overdue Home tasks
+    const lateRows = [
+      ...overdue.map((i) => { const [ic, cl] = itemIcon(i); return trow({ late: true, icon: ic, cls: cl, title: esc(i.title), meta: `${esc(overdueText(i.due_at))}${isNagging(i) ? ` · ${{ '15m': 'every 15 min', hourly: 'hourly', daily: 'daily' }[i.nag]}` : ''}${i.area ? ` · ${esc(AREAS[i.area] || '')}` : ''}`,
+        open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `${i.source === 'wayfare' ? 'Booked' : 'Done'}: ${i.title}` } }); }),
+      ...homeTasks.filter((x) => x.i.k < 0).sort((a, b) => a.i.k - b.i.k).map(({ t, i }) => trow({ late: true, icon: 'home', cls: 'k-home', title: esc(t.name), meta: `Home · ${-i.k} day${i.k === -1 ? '' : 's'} late`,
+        open: `data-act="home-open" data-id="${t.id}"`, done: { attrs: `data-act="home-done" data-id="${t.id}"`, label: `Done: ${t.name}` } })),
+    ];
+    const top3 = open.filter((i) => i.top3 && !i.due_at).slice(0, 3).map((i) => trow({ icon: 'check', cls: 'k-task', title: esc(i.title), meta: `Top 3${i.area ? ` · ${esc(AREAS[i.area] || '')}` : ''}`,
+      open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `Done: ${i.title}` } }));
+    const todayRows = [...lateRows, ...top3, ...entriesFor(ymd(sod), true)];
+    const weekDays = Array.from({ length: 6 }, (_, i) => { const d = new Date(+sod + (i + 1) * DAY); return { d, D: ymd(d), rows: entriesFor(ymd(d), false) }; }).filter((x) => x.rows.length);
 
     // catch up with
     const reach = data.people.map((p) => ({ p, s: checkinStatus(p) })).filter((x) => x.s && x.s.overdue)
@@ -455,28 +489,8 @@ import * as TK from './tasks.js';
       </div>`;
     }).join('')}</div>`}</section>` : '';
 
-    // coming up (next 7 days, after today)
-    const upcoming = [
-      ...eventsOn(eod, week).filter((e) => new Date(e.start_at) >= eod)
-        .map((e) => ({ at: Date.parse(e.start_at), html: eventRow(e, { when: weekday(e.start_at), meta: `${e.all_day ? 'All day' : esc(fmtTime(e.start_at))} · Calendar` }) })),
-      ...open.filter((i) => i.due_at && new Date(i.due_at) >= eod && new Date(i.due_at) < week && !overdueIds.has(i.id))
-        .map((i) => ({ at: Date.parse(i.due_at), html: itemRow(i, { when: weekday(i.due_at), skipDue: true }) })),
-      ...(data.person_dates || []).map((d) => ({ d, p: data.people.find((x) => x.id === d.person_id), b: birthdayIn(d.date) }))
-        .filter((x) => x.p && inCircle(x.p) && x.b && x.b.days >= 0 && x.b.days < 7)
-        .map((x) => ({ at: +x.b.date, html: `<li class="row"><span class="when">${x.b.days === 0 ? 'Today' : esc(weekday(x.b.date))}</span>${kindMark('heart', 'k-people')}<button type="button" class="row-main" data-act="person" data-id="${x.p.id}"><div class="t">${esc(x.p.name)}</div><div class="meta">${esc(x.d.label)}${/^\d{4}/.test(x.d.date) ? ` · ${x.b.date.getFullYear() - +x.d.date.slice(0, 4)} years` : ''}</div></button></li>` })),
-      // Medications that aren't every-day: show their next dose days this week
-      ...(data.meds || []).filter((m) => !((m.freq || 'daily') === 'daily' && (+m.interval_n || 1) === 1)).flatMap((m) =>
-        Array.from({ length: 6 }, (_, i) => { const d = startOfDay(); d.setDate(d.getDate() + i + 1); return d; })
-          .filter((d) => medDueOn(m, ymd(d)))
-          .map((d) => { const day = slotsOn(m, ymd(d)); const [h, mi] = day[0].split(':').map(Number); const at = new Date(d); at.setHours(h, mi, 0, 0);
-            return { at: +at, html: `<li class="row"><span class="when">${esc(weekday(d))}</span>${kindMark('pill', 'k-med')}<button type="button" class="row-main" data-act="med-open" data-id="${m.id}"><div class="t">${esc(m.name)}${m.dose ? ` · ${esc(m.dose)}` : ''}</div><div class="meta">Medication · ${esc(day.map(fmtSlot).join(', '))} · ${esc(describeSchedule(m).split(' · ')[0])}</div></button></li>` }; })),
-      ...bdays.filter((x) => x.b.days > 0 && x.b.days < 7 && x !== featured)
-        .map((x) => ({ at: +x.b.date, html: `<li class="row"><span class="when">${esc(weekday(x.b.date))}</span>${kindMark('balloon', 'k-people')}<button type="button" class="row-main" data-act="person" data-id="${x.p.id}"><div class="t">${esc(x.p.name)}</div><div class="meta">Birthday${x.b.turns ? ` · turns ${x.b.turns}` : ''}</div></button></li>` })),
-    ].sort((a, b) => a.at - b.at).map((x) => x.html);
-
     const undated = open.filter((i) => !i.due_at && !i.top3).length;
     const synced = data.settings.events_synced_at;
-    const nothingToday = !rest.length;
     const tripCard = viewTripCard(open);
     // A group (with its divider) only appears when something is in it
     const tgroup = (label, html) => (html.trim() ? `<div class="tgroup" role="group" aria-label="${label}">${html}</div>` : '');
@@ -487,26 +501,15 @@ import * as TK from './tasks.js';
         <h1>Good ${part}${name ? `, ${esc(name)}` : ''}</h1>
         <span class="summary">${esc(summary)}</span>
       </header>
-      ${viewWrap(open, eod)}
       ${viewWeather()}
       ${viewFocusBanner()}
       <div class="week" role="list" aria-label="Next 7 days">${days}</div>
       ${viewSetup()}
-      ${nowCard}
-      ${tgroup('Today', `
-        ${nothingToday
-          ? `<section>${head('Today', { key: 'rest' })}${isCol('rest') ? '' : `<div class="allclear">${synced ? 'Nothing else today. Enjoy it.' : 'Nothing yet. Calendar events appear once the Shortcut runs.'}</div>`}</section>`
-          : section(`Today <span class="n">${rest.length}</span>`, rest, null, { key: 'rest' })}
-        ${(() => { const r = rwTodayRows(3); return r.length ? section(`Credits ending <span class="n">${r.length}</span>`, r, null, { key: 'rwsoon' }) : ''; })()}
-        ${viewMeds()}
-        ${viewHabits()}
-        ${featured && featured.b.days === 0 ? bdayCard : ''}`)}
-      ${tgroup('This week', `
-        ${featured && featured.b.days > 0 ? bdayCard : ''}
-        ${section(`This week <span class="n">${upcoming.length}</span>`, upcoming, null, { key: 'upcoming', add: 'go-meals', addLabel: 'Plan meals' })}
-        ${viewHomeToday()}
-        ${(() => { const r = rwTodayRows(7, 3); return r.length ? section(`Credits this week <span class="n">${r.length}</span>`, r, null, { key: 'rwweek' }) : ''; })()}
-        ${catchUp}`)}
+      <section aria-label="Today">${head(`Today <span class="n">${todayRows.length || ''}</span>`, { key: 'rest' })}
+        ${isCol('rest') ? '' : todayRows.length ? listCard(todayRows) : `<div class="allclear">${synced ? 'Nothing else today. Enjoy it.' : 'Nothing yet. Calendar events appear once the Shortcut runs.'}</div>`}</section>
+      <section aria-label="This week">${head(`This week <span class="n">${weekDays.reduce((n, x) => n + x.rows.length, 0) || ''}</span>`, { key: 'upcoming', add: 'go-meals', addLabel: 'Plan meals' })}
+        ${isCol('upcoming') ? '' : weekDays.length ? weekDays.map((x) => `<div class="tday"><button type="button" class="tday-h" data-act="day" data-date="${x.D}">${esc(x.d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }))}</button>${listCard(x.rows)}</div>`).join('') : '<div class="allclear">Nothing else this week.</div>'}</section>
+      ${catchUp}
       ${tgroup('Later', tripCard)}
       ${undated ? `<a class="link" href="#all">${plural(undated, 'task')} without a date ›</a>` : ''}
     `;
@@ -2916,6 +2919,20 @@ import * as TK from './tasks.js';
     if (!el) return;
     const id = +el.dataset.id;
     const act = el.dataset.act;
+    if (act === 'task-open') { const t = taskById(id); if (t) openTask(t); return; }
+    if (act === 'task-done') {
+      const t = taskById(id); if (!t) return;
+      (el.closest('.row') || el).classList.add('completing'); await new Promise((r) => setTimeout(r, 260));
+      taskDo(t, 'done', { key: el.dataset.occ }).catch((err) => toast(err.message)); return;
+    }
+    if (act === 'ev-hide') {
+      (el.closest('.row') || el).classList.add('completing');
+      const keep = JSON.parse(el.dataset.keep || '{}');
+      api('/api/event-prefs', { body: { key: el.dataset.key, hidden: 1, note: keep.note, label: keep.label } })
+        .then(async () => { await refresh(); toast('Hidden', async () => { await api('/api/event-prefs', { body: { key: el.dataset.key, hidden: null, note: keep.note, label: keep.label } }); await refresh(); }); })
+        .catch((err) => toast(err.message));
+      return;
+    }
     if (act === 'rw-tab') { ui.rwTab = el.dataset.v; render(); window.scrollTo(0, 0); return; }
     if (act === 'rw-who') { ui.rwWho = el.dataset.v; render(); return; }
     if (act === 'rw-type') { ui.rwType = el.dataset.v; render(); return; }
