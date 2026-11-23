@@ -1061,3 +1061,7 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 .habit .hstreak { font-variant-numeric: tabular-nums; }
 .tk-dose { font-size: 15px; font-weight: 600; color: var(--muted); }
 .tk-hint { padding: 4px 14px 10px; margin: 0; } .k-home { background: var(--a-home-bg); color: var(--a-home); }
+/* Skip / Snooze line up under the main button: equal halves of its width (one button = full width) */
+.tk-main .btns2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
+.tk-main .btns2 > .btn { width: 100%; justify-content: center; text-align: center; margin: 0; }
+.tk-main .btns2 > .btn:only-child { grid-column: 1 / -1; }
