@@ -1327,7 +1327,7 @@ async function syncPeopleTasks(env, uid, personId = null) {
   const tz = env.TZ || 'America/Chicago';
   const today = localParts(new Date(), tz).date;
   const people = (await env.DB.prepare(`SELECT * FROM people WHERE user_id = ?${personId ? ' AND id = ?' : ''}`).bind(...(personId ? [uid, personId] : [uid])).all()).results;
-  const dates = people.length ? (await env.DB.prepare(`SELECT * FROM person_dates WHERE person_id IN (${people.map(() => '?').join(',')})`).bind(...people.map((p) => p.id)).all()).results : [];
+  const dates = people.length ? (await env.DB.prepare('SELECT * FROM person_dates WHERE person_id IN (SELECT value FROM json_each(?))').bind(JSON.stringify(people.map((p) => p.id))).all()).results : [];
   const want = [];
   for (const p of people) {
     const first = String(p.name).split(' ')[0];
@@ -1352,7 +1352,7 @@ async function syncPeopleTasks(env, uid, personId = null) {
   const keep = want.map((w) => w.ref);
   const scope = personId ? `AND (legacy_ref LIKE 'bday:${+personId}' OR legacy_ref LIKE 'catchup:${+personId}' OR (kind = 'pdate' AND json_extract(details, '$.person_id') = ${+personId}))` : '';
   stmts.push(env.DB.prepare(`UPDATE tasks SET archived = 1 WHERE user_id = ? AND kind IN ('birthday', 'pdate', 'catchup') ${scope}
-    ${keep.length ? `AND legacy_ref NOT IN (${keep.map(() => '?').join(',')})` : ''}`).bind(uid, ...keep));
+    AND legacy_ref NOT IN (SELECT value FROM json_each(?))`).bind(uid, JSON.stringify(keep)));
   for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
   return want.length;
 }
@@ -1389,7 +1389,8 @@ const taskOut = (t) => (t ? { ...t, details: t.details ? JSON.parse(t.details) :
 async function loadTasks(env, uid) {
   const { results } = await env.DB.prepare('SELECT * FROM tasks WHERE archived = 0 AND (user_id = ? OR shared = 1) ORDER BY sort, id').bind(uid).all();
   const ids = results.map((t) => t.id);
-  const logs = ids.length ? (await env.DB.prepare(`SELECT task_id, occ, status, amount, at FROM task_log WHERE task_id IN (${ids.map(() => '?').join(',')}) AND occ >= date('now', '-750 days')`).bind(...ids).all()).results : [];
+  // (A subquery, not one ? per task: the database allows at most 100 bound values per query.)
+  const logs = ids.length ? (await env.DB.prepare(`SELECT task_id, occ, status, amount, at FROM task_log WHERE task_id IN (SELECT id FROM tasks WHERE archived = 0 AND (user_id = ? OR shared = 1)) AND occ >= date('now', '-750 days')`).bind(uid).all()).results : [];
   return { tasks: results.map(taskOut), task_log: logs };
 }
 
@@ -1401,7 +1402,7 @@ async function sendTaskReminders(env, tz, local, quiet, now, uid) {
   if (!results.length) return [];
   const tasks = results.map(taskOut);
   const ids = tasks.map((t) => t.id);
-  const done = new Set((await env.DB.prepare(`SELECT task_id, occ FROM task_log WHERE task_id IN (${ids.map(() => '?').join(',')}) AND occ >= ?`).bind(...ids, TK.addDays(local.date, -400)).all()).results.map((l) => `${l.task_id}|${l.occ}`));
+  const done = new Set((await env.DB.prepare(`SELECT task_id, occ FROM task_log WHERE task_id IN (SELECT value FROM json_each(?)) AND occ >= ?`).bind(JSON.stringify(ids), TK.addDays(local.date, -400)).all()).results.map((l) => `${l.task_id}|${l.occ}`));
   const minutesNow = local.h * 60 + local.min;
   const dow = new Date(Date.UTC(local.y, local.m - 1, local.d)).getUTCDay();
   const sent = [];
