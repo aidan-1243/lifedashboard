@@ -4,6 +4,7 @@ import { parseVcards, birthdayEventPerson } from './vcard.js';
 import { medDueOn, describeSchedule, nextDue, WEEKDAY_NAMES, slotsOn, allTimes, fmtSlot, ORDINAL } from './meds.js';
 import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, monthsFor, minutesOf } from './home.js';
 import * as RW from './rewards.js';
+import * as TK from './tasks.js';
 
 (() => {
   'use strict';
@@ -26,7 +27,7 @@ import * as RW from './rewards.js';
 
   let token = '';
   try { token = localStorage.getItem('life_token') || ''; } catch (_) { /* storage blocked */ }
-  let data = { items: [], people: [], events: [], trips: [], documents: [], habits: [], habit_logs: [], gifts: [], person_dates: [], meds: [], med_logs: [], home_tasks: [], home_log: [], meals: [], meal_titles: [], settings: {} };
+  let data = { items: [], people: [], events: [], trips: [], documents: [], tasks: [], task_log: [], gifts: [], person_dates: [], meds: [], med_logs: [], home_tasks: [], home_log: [], meals: [], meal_titles: [], settings: {} };
   let weather = null;
   let weatherAt = 0;
   let needLogin = false; // only used for local development (online, Cloudflare Access is the sign-in)
@@ -301,6 +302,9 @@ import * as RW from './rewards.js';
     suitcase: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 12h18"/>',
     home: '<path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
     fork: '<path d="M4 3v8a3 3 0 0 0 6 0V3M7 3v18M17 21V3c-2 1.5-3 4-3 7s1 4 3 4"/>',
+    check: '<rect x="3.5" y="3.5" width="17" height="17" rx="5"/><path d="M8 12.5l3 3 5-6"/>',
+    clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+    repeat: '<path d="M4 9a5 5 0 0 1 5-5h9l-3-3M20 15a5 5 0 0 1-5 5H6l3 3"/>',
   };
   const kindMark = (k, cls = '') => `<span class="evmark ${cls}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${KIND_ICONS[k]}</svg></span>`;
 
@@ -586,71 +590,184 @@ import * as RW from './rewards.js';
     </a>`;
   }
 
-  // ---------- habits ----------
+  // ---------- tasks (the one task model; see docs/tasks-design.md) ----------
   const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  function habitStreak(id) {
-    const done = new Set(data.habit_logs.filter((l) => l.habit_id === id).map((l) => l.date));
-    const d = startOfDay();
-    if (!done.has(ymd(d))) d.setDate(d.getDate() - 1); // today not done yet: count up to yesterday
-    let n = 0;
-    while (done.has(ymd(d))) { n++; d.setDate(d.getDate() - 1); }
-    return n;
+  const myHabits = () => (data.tasks || []).filter((t) => t.kind === 'habit' && (!data.me || t.user_id === data.me.id));
+  const taskById = (id) => (data.tasks || []).find((t) => t.id === id);
+  const taskLog = (t) => (data.task_log || []).filter((l) => l.task_id === t.id);
+  const TASK_MAIN = { habit: 'Done', task: 'Done' };
+  const TASK_ICON = { habit: 'check', task: 'check' };
+  const dayLabel = (d) => { const t = todayYmd(); if (d === t) return 'Today'; if (d === TK.addDays(t, 1)) return 'Tomorrow'; if (d === TK.addDays(t, -1)) return 'Yesterday'; return parseDay(d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }); };
+
+  // The occurrence the main button acts on: today's first one not done, a missed one-off,
+  // or the next one coming up.
+  function taskOcc(t) {
+    const today = todayYmd();
+    const logs = new Map(taskLog(t).map((l) => [l.occ, l]));
+    const list = TK.occurrencesOn(t, today).map((tm) => ({ date: today, time: tm, key: TK.occKey(today, tm) }));
+    if (list.length) { const o = list.find((x) => !logs.get(x.key)) || list[list.length - 1]; return { ...o, log: logs.get(o.key) || null }; }
+    if ((!t.repeat || t.repeat === 'never') && t.date) { const key = TK.occKey(t.date, t.time || ''); return { date: t.date, time: t.time || '', key, log: logs.get(key) || null }; }
+    const next = t.date ? TK.nextDate(t, today) : null;
+    if (!next) return null;
+    const tm = TK.occurrencesOn(t, next)[0] || '';
+    const key = TK.occKey(next, tm);
+    return { date: next, time: tm, key, log: logs.get(key) || null, future: true };
+  }
+  const streakOf = (t) => TK.streak(t, taskLog(t), todayYmd());
+  const flame = (n) => `<span class="tk-fire${n ? '' : ' zero'}" aria-label="${n}-time streak">${n} 🔥</span>`;
+
+  async function taskDo(t, status, occ = taskOcc(t)) {
+    if (!occ) return;
+    await api(`/api/tasks/${t.id}/log`, { body: { occ: occ.key, status } });
+    await refresh();
+    const s = streakOf(taskById(t.id) || t).current;
+    toast(status === 'skipped' ? 'Skipped' : status === 'undo' ? 'Undone' : s > 1 ? `Nice: ${s} in a row 🔥` : 'Done',
+      status === 'undo' ? null : async () => { await api(`/api/tasks/${t.id}/log`, { body: { occ: occ.key, status: 'undo' } }); await refresh(); });
   }
 
+  function openTask(t0) {
+    const isNew = !t0.id;
+    const t = { kind: 'task', repeat: 'never', nag: 0, nag_mode: 'hourly', date: todayYmd(), time: null, details: {}, ...t0 };
+    const details = t.details || {};
+    const occ = isNew ? null : taskOcc(t);
+    const st = TK.streak(t, taskLog(t), todayYmd());
+    const done = occ && occ.log && occ.log.status !== 'skipped';
+    const status = isNew ? '' : !t.date ? 'No date' : occ ? `${occ.future ? 'Next: ' : ''}${dayLabel(occ.date)}${occ.time ? ` ${fmtSlot(occ.time)}` : ''}${done ? ' · done' : occ.log ? ' · skipped' : ''}` : 'Finished';
+    // Custom repeat uses the same chip picker as medications
+    const cst = medState({ id: t.repeat === 'custom' ? 1 : 0, ...(t.repeat === 'custom' && t.custom ? { freq: t.custom.freq, interval_n: t.custom.interval_n, weekdays: t.custom.weekdays, month_days: t.custom.month_days, times: t.custom.times || t.time || '08:00', dose_times: t.custom.dose_times ? JSON.stringify(t.custom.dose_times) : null } : { times: t.time || '08:00' }), start_date: t.date || todayYmd() });
+    const users = data.users || [];
+    const opt = (list, sel) => list.map(([v, l]) => `<option value="${v}"${String(sel) === String(v) ? ' selected' : ''}>${esc(l)}</option>`).join('');
+    const sw = (name, on, label) => `<label class="tk-row"><span>${label}</span><input type="checkbox" class="tk-switch" name="${name}"${on ? ' checked' : ''}></label>`;
+    const recent = isNew ? [] : TK.recent(t, taskLog(t), todayYmd(), 14);
+    const lastDone = isNew ? null : taskLog(t).filter((l) => l.status !== 'skipped').sort((a, z) => z.occ.localeCompare(a.occ))[0];
+    sheet.innerHTML = `<form method="dialog" class="tk-sheet">
+      <div class="tk-head"><span class="tk-icon">${kindMark(TASK_ICON[t.kind] || 'check', 'k-task')}</span>
+        <div class="tk-title"><h3>${isNew ? `New ${t.kind === 'habit' ? 'habit' : 'task'}` : esc(t.title)}</h3>${status ? `<p class="sub">${esc(status)}</p>` : ''}</div>
+        ${isNew ? '' : flame(st.current)}</div>
+      ${isNew || !occ ? '' : `<div class="tk-main">
+        ${done ? `<button type="button" class="btn ok big" data-tk="undo">✓ ${esc(TASK_MAIN[t.kind] || 'Done')} · Undo</button>` : `<button type="button" class="btn dark big" data-tk="done">${esc(TASK_MAIN[t.kind] || 'Done')}</button>`}
+        ${done ? '' : `<div class="btns2"><button type="button" class="btn ghost" data-tk="skip">Skip${occ.future ? '' : ' this time'}</button>${t.nag ? '<button type="button" class="btn ghost" data-tk="snooze">Snooze 1h</button>' : ''}</div>`}
+      </div>`}
+      <div class="lbl">Details</div>
+      <div class="tk-group">
+        <label class="tk-row tk-in"><span>Name</span><input name="title" value="${esc(t.title || '')}" required maxlength="120" placeholder="${t.kind === 'habit' ? 'Workout' : 'Call the plumber'}"></label>
+        <label class="tk-row tk-in"><span>Notes</span><input name="notes" value="${esc(details.notes || '')}" maxlength="300" placeholder="Optional"></label>
+      </div>
+      <div class="lbl">Schedule</div>
+      <div class="tk-group">
+        ${sw('has_date', !!t.date, `${kindMark('calendar')} Date`)}
+        <label class="tk-row tk-sub" data-tkshow="date"><span>On</span><input type="date" name="date" value="${esc(t.date || todayYmd())}"></label>
+        ${sw('has_time', !!t.time, `${kindMark('clock')} Time`)}
+        <label class="tk-row tk-sub" data-tkshow="time"><span>At</span><input type="time" name="time" value="${esc(t.time || '08:00')}"></label>
+        <label class="tk-row" data-tkshow="date"><span>${kindMark('repeat')} Repeat</span><select name="repeat">${opt(TK.REPEATS, t.repeat || 'never')}</select></label>
+        <div class="tk-custom" data-tkshow="custom"><div class="mpresets chips-wrap"></div><div class="mpanel"></div><p class="msum"></p></div>
+      </div>
+      <div class="lbl">Reminders</div>
+      <div class="tk-group">
+        ${sw('nag', !!t.nag, 'Nag until done')}
+        <label class="tk-row tk-sub" data-tkshow="nag"><span>How often</span><select name="nag_mode">${opt([['hourly', 'Hourly'], ['daily', 'Daily'], ['weekly', 'Weekly']], t.nag_mode || 'hourly')}</select></label>
+        <label class="tk-row tk-sub" data-tkshow="nagday"><span>On</span><select name="nag_dow">${opt(WEEKDAY_NAMES.map((d, i) => [i, d]), t.nag_dow ?? 1)}</select></label>
+        <label class="tk-row tk-sub" data-tkshow="nagtime"><span>At</span><input type="time" name="nag_time" value="${esc(t.nag_time || '09:00')}"></label>
+        ${users.length > 1 ? `<label class="tk-row" data-tkshow="nag"><span>For</span><select name="remind_to">${opt([['', 'Me'], ...users.filter((u) => !data.me || u.id !== data.me.id).map((u) => [u.id, u.name]), [0, 'Both of us']], t.remind_to ?? '')}</select></label>` : ''}
+        ${users.length > 1 && t.kind !== 'habit' ? sw('shared', !!t.shared, `Shared with ${esc(others().map((u) => u.name).join(', '))}`) : ''}
+      </div>
+      ${isNew ? '' : `<div class="lbl">History</div>
+      <div class="tk-group">
+        <div class="tk-strip" role="img" aria-label="Recent: ${recent.filter((r) => r.status === 'done' || r.status === 'partial').length} of ${recent.length} done">${recent.map((r) => `<i class="${r.status}" title="${esc(dayLabel(r.d))}${r.time ? ` ${fmtSlot(r.time)}` : ''}: ${r.status}"></i>`).join('')}</div>
+        <div class="tk-row"><span class="meta">${lastDone ? `Last done ${esc(dayLabel(lastDone.occ.slice(0, 10)))}` : 'Not done yet'} · best ${st.best}</span><button type="button" class="link" data-tk="all">All ›</button></div>
+        <div class="tk-all" hidden>${taskLog(t).sort((a, z) => z.occ.localeCompare(a.occ)).slice(0, 60).map((l) => `<div class="tk-row"><span>${esc(dayLabel(l.occ.slice(0, 10)))}${l.occ.length > 10 ? ` ${fmtSlot(l.occ.slice(11))}` : ''} · ${l.status === 'skipped' ? 'skipped' : 'done'}</span><button type="button" class="pbtn icon" data-tkdel="${esc(l.occ)}" aria-label="Remove this entry">×</button></div>`).join('') || '<div class="tk-row meta">Nothing yet</div>'}</div>
+      </div>`}
+      <div class="actions">${isNew ? '' : '<button type="button" class="btn danger" data-tk="remove">Remove</button>'}<span class="grow"></span>
+        <button type="button" class="btn ghost" data-sheet="close">${isNew ? 'Cancel' : 'Close'}</button><button type="submit" class="btn dark">Save</button></div>
+    </form>`;
+    const form = sheet.querySelector('form');
+    const show = () => {
+      const has = (n) => form[n] && form[n].checked;
+      const vis = { date: has('has_date'), time: has('has_date') && has('has_time') && form.repeat.value !== 'custom', custom: has('has_date') && form.repeat.value === 'custom',
+        nag: has('nag'), nagday: has('nag') && form.nag_mode.value === 'weekly', nagtime: has('nag') && form.nag_mode.value !== 'hourly' };
+      form.querySelectorAll('[data-tkshow]').forEach((el) => { el.hidden = !vis[el.dataset.tkshow]; });
+      form.querySelector('label.tk-row:has([name="has_time"])').hidden = !vis.date || form.repeat.value === 'custom';
+    };
+    const drawCustom = () => {
+      const box = form.querySelector('.tk-custom');
+      const count = { '2day': cst.dayTimes.length, '2week': cst.days.length, '2month': cst.dates.length };
+      box.querySelector('.mpresets').innerHTML = MED_PRESETS.map(([k, v]) => `<button type="button" class="chip-btn" role="radio" aria-checked="${cst.p === k}" data-mp="${k}">${cst.p === k && count[k] > 2 ? v.replace('2×', `${count[k]}×`) : v}</button>`).join('');
+      box.querySelector('.mpanel').innerHTML = medPanel(cst);
+      box.querySelector('.msum').textContent = medSummary(cst);
+    };
+    drawCustom(); bindMedPicker(form.querySelector('.tk-custom'), cst, drawCustom);
+    form.addEventListener('change', (e) => { if (['has_date', 'has_time', 'repeat', 'nag', 'nag_mode'].includes(e.target.name)) show(); });
+    show();
+    form.querySelectorAll('[data-tk]').forEach((b) => { b.onclick = async () => {
+      const a = b.dataset.tk;
+      try {
+        if (a === 'done' || a === 'skip') { sheet.close(); await taskDo(t, a === 'done' ? 'done' : 'skipped', occ); }
+        else if (a === 'undo') { await taskDo(t, 'undo', occ); openTask(taskById(t.id)); }
+        else if (a === 'snooze') { await api(`/api/tasks/${t.id}/snooze`, { body: { minutes: 60 } }); sheet.close(); await refresh(); toast('Snoozed 1 hour'); }
+        else if (a === 'all') { const box = form.querySelector('.tk-all'); box.hidden = !box.hidden; }
+        else if (a === 'remove') { if (!confirm(`Remove "${t.title}"? Its history is kept in backups.`)) return; await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Removed'); }
+      } catch (err) { toast(err.message); }
+    }; });
+    form.querySelectorAll('[data-tkdel]').forEach((b) => { b.onclick = async () => {
+      try { await api(`/api/tasks/${t.id}/log`, { body: { occ: b.dataset.tkdel, status: 'undo' } }); await refresh(); openTask(taskById(t.id)); } catch (err) { toast(err.message); }
+    }; });
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(form);
+      const hasDate = !!form.has_date.checked, repeat = hasDate ? f.get('repeat') : 'never';
+      const body = { kind: t.kind, title: f.get('title').trim(), details: { ...details, notes: f.get('notes').trim() || undefined },
+        date: hasDate ? f.get('date') : null, time: hasDate && form.has_time.checked && repeat !== 'custom' ? f.get('time') : null, repeat, custom: null,
+        nag: form.nag.checked ? 1 : 0, nag_mode: f.get('nag_mode'), nag_time: f.get('nag_time'), nag_dow: +f.get('nag_dow') };
+      if (f.has('remind_to')) body.remind_to = f.get('remind_to') === '' ? null : +f.get('remind_to');
+      if (form.shared) body.shared = form.shared.checked ? 1 : 0;
+      if (repeat === 'custom') {
+        const sch = medPickerSchedule(cst, body.date);
+        if (sch.error) { toast(sch.error); return; }
+        body.custom = { freq: sch.freq, interval_n: sch.interval_n, weekdays: sch.weekdays, month_days: sch.month_days, times: sch.times, dose_times: sch.dose_times };
+        if (sch.start_date) body.date = sch.start_date;
+      }
+      if (!body.title) { toast('Give it a name'); return; }
+      try {
+        if (isNew) await api('/api/tasks', { body }); else await api(`/api/tasks/${t.id}`, { method: 'PATCH', body });
+        sheet.close(); await refresh(); toast('Saved');
+      } catch (err) { toast(err.message); }
+    };
+    showSheet();
+  }
+
+  // ---------- habits (tasks of kind "habit") ----------
   function viewHabits() {
-    const habits = data.habits || [];
+    const today = todayYmd();
+    const habits = myHabits().filter((t) => TK.isDueOn(t, today));
     if (!habits.length) return '';
-    const today = ymd(startOfDay());
-    const doneToday = new Set(data.habit_logs.filter((l) => l.date === today).map((l) => l.habit_id));
-    const left = habits.filter((h) => !doneToday.has(h.id)).length;
+    const doneNow = (t) => { const o = taskOcc(t); return !!(o && !o.future && o.log && o.log.status !== 'skipped'); };
+    const left = habits.filter((t) => !doneNow(t)).length;
     return `<section aria-label="Habits">
       ${head(`Habits <span class="n">${left ? `${left} to go` : 'all done ✓'}</span>`, { key: 'habits', add: 'edit-habits', addLabel: 'Edit habits' })}
-      ${isCol('habits') ? '' : `<div class="habits">${habits.map((h) => {
-        const on = doneToday.has(h.id);
-        const streak = habitStreak(h.id);
-        return `<button type="button" class="habit${on ? ' on' : ''}" data-act="habit" data-id="${h.id}" aria-pressed="${on}">
+      ${isCol('habits') ? '' : `<div class="habits">${habits.map((t) => {
+        const on = doneNow(t);
+        const s = streakOf(t).current;
+        return `<button type="button" class="habit${on ? ' on' : ''}" data-act="habit" data-id="${t.id}" aria-pressed="${on}" aria-label="${esc(t.title)}${s ? `, ${s} in a row` : ''}. Press and hold for details">
           <span class="hcheck" aria-hidden="true">${on ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>' : ''}</span>
-          <span class="hname">${esc(h.name)}</span>${streak > 1 ? `<span class="hstreak">${streak}d</span>` : ''}
+          <span class="hname">${esc(t.title)}</span>${s ? `<span class="hstreak">${s} 🔥</span>` : ''}
         </button>`;
       }).join('')}</div>`}
     </section>`;
   }
 
   function openHabits() {
-    const rows = (data.habits || []).map((h) => `<li class="row"><div class="row-inner">
-      <input class="hinput" data-hid="${h.id}" value="${esc(h.name)}" aria-label="Habit name" style="flex:1;border:0;background:transparent;font-size:16px;padding:14px 0">
-      <button type="button" class="pbtn" data-hdel="${h.id}">Remove</button></div></li>`).join('');
+    const rows = myHabits().map((t) => { const s = streakOf(t);
+      return `<li class="row"><button type="button" class="row-main" data-hopen="${t.id}"><div class="t">${esc(t.title)}</div><div class="meta">${esc(TK.describeRepeat(t))}${t.nag ? ` · ${esc(TK.describeNag(t))}` : ''} · best ${s.best}</div></button>${flame(s.current)}</li>`; }).join('');
     sheet.innerHTML = `<form method="dialog">
       <h3>Habits</h3>
-      <p class="sub">Small daily things you want to keep up. Tap one on Today to check it off. Medicine that needs nagging works better as a repeating task.</p>
-      ${rows ? `<div class="card"><ul class="list">${rows}</ul></div>` : ''}
-      <label class="field"><span>Add a habit</span><input name="new" placeholder="e.g. Workout, Read 20 min, Water" maxlength="40"></label>
-      <div class="actions"><span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Close</button><button type="submit" class="btn dark">Save</button></div>
+      <p class="sub">Things you want to keep up. Tap one on Today to check it off; press and hold it for its streak, history and schedule.</p>
+      ${rows ? `<div class="card no-when"><ul class="list">${rows}</ul></div>` : ''}
+      <div class="actions"><span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Close</button><button type="button" class="btn dark" data-hnew="1">Add a habit</button></div>
     </form>`;
     const form = sheet.querySelector('form');
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      try {
-        for (const inp of form.querySelectorAll('[data-hid]')) {
-          const h = data.habits.find((x) => x.id === +inp.dataset.hid);
-          if (h && inp.value.trim() && inp.value.trim() !== h.name) await api(`/api/habits/${h.id}`, { method: 'PATCH', body: { name: inp.value.trim() } });
-        }
-        const name = new FormData(form).get('new').trim();
-        if (name) await api('/api/habits', { body: { name } });
-        sheet.close();
-        await refresh();
-      } catch (err) { toast(err.message); }
-    };
     form.querySelector('[data-sheet="close"]').onclick = () => sheet.close();
-    form.querySelectorAll('[data-hdel]').forEach((b) => {
-      b.onclick = async () => {
-        const h = data.habits.find((x) => x.id === +b.dataset.hdel);
-        if (!confirm(`Remove "${h.name}" and its history?`)) return;
-        await api(`/api/habits/${h.id}`, { method: 'DELETE' });
-        await refresh();
-        openHabits();
-      };
-    });
+    form.querySelector('[data-hnew]').onclick = () => openTask({ kind: 'habit', repeat: 'daily' });
+    form.querySelectorAll('[data-hopen]').forEach((b) => { b.onclick = () => openTask(taskById(+b.dataset.hopen)); });
     showSheet();
   }
 
@@ -914,7 +1031,7 @@ import * as RW from './rewards.js';
         for (const id of u.ids) await api(`/api/home/tasks/${id}/log?date=${u.date}`, { method: 'DELETE' });
         for (const [id, snz] of Object.entries(u.snooze || {})) if (snz) await api(`/api/home/tasks/${id}`, { method: 'PATCH', body: { snooze_until: snz } });
       } else if (u.k === 'home-snooze') await api(`/api/home/tasks/${u.id}`, { method: 'PATCH', body: { snooze_until: u.prev } });
-      else if (u.k === 'habit') await api(`/api/habits/${u.id}/toggle`, { body: { date: u.date } });
+      else if (u.k === 'habit') await api(`/api/tasks/${u.id}/log`, { body: { occ: u.occ, status: u.was ? 'done' : 'undo' } });
       else if (u.k === 'med') await api(`/api/meds/${u.id}/log`, { body: { date: u.date, slot: u.slot, status: 'undo' } });
       else if (u.k === 'meal-eaten') await api(`/api/meals/${u.date}/eaten`, { body: { eaten: 0 } });
       else if (u.k === 'contact') await api(`/api/people/${u.id}`, { method: 'PATCH', body: u.prev });
@@ -1093,7 +1210,7 @@ import * as RW from './rewards.js';
     if (dismissed) return '';
     const steps = [
       !data.people.length && ['link', '#settings', 'Import contacts'],
-      !(data.habits || []).length && ['btn', 'edit-habits', 'Add habits'],
+      !myHabits().length && ['btn', 'edit-habits', 'Add habits'],
       !(data.meds || []).length && ['btn', 'med-new', 'Add a medication'],
       !(data.trips || []).length && ['btn', 'trip-new', 'Add a trip'],
       !data.settings.weather_lat && ['link', '#settings', 'Add weather'],
@@ -1272,6 +1389,63 @@ import * as RW from './rewards.js';
       ${timeRow('Time', 'every', st.time)}`;
   }
 
+  // The preset-chip schedule picker (medications, and Custom repeats on any task)
+  function bindMedPicker(root, st, draw) {
+    root.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b || !root.contains(b)) return;
+      if (b.dataset.mp) { medPick(st, b.dataset.mp); draw(); return; }
+      if (b.dataset.mday !== undefined) {
+        const d = +b.dataset.mday;
+        st.days = st.days.includes(d) ? st.days.filter((x) => x !== d) : [...st.days, d];
+        if (st.days.includes(d)) st.dayT[d] = st.dayT[d] || st.dayT[st.days[0]] || st.time || '08:00';
+        st.p = st.days.length === 1 ? 'weekly' : '2week'; draw(); return;
+      }
+      if (b.dataset.mdate) {
+        const d = +b.dataset.mdate;
+        st.dates = st.dates.includes(d) ? st.dates.filter((x) => x !== d) : [...st.dates, d];
+        if (st.dates.includes(d)) st.dateT[d] = st.dateT[d] || st.dateT[st.dates[0]] || st.time || '08:00';
+        st.p = st.dates.length === 1 ? 'monthly' : '2month'; draw(); return;
+      }
+      if (b.dataset.madd) { st.dayTimes.push(st.dayTimes.length === 1 ? '20:00' : '12:00'); st.p = '2day'; draw(); return; }
+      if (b.dataset.mrm !== undefined) { st.dayTimes.splice(+b.dataset.mrm, 1); st.p = st.dayTimes.length > 1 ? '2day' : 'daily'; draw(); return; }
+      if (b.dataset.mstep) { st.every = Math.min(52, Math.max(1, st.every + +b.dataset.mstep)); if (st.p === '2wk' && !(st.every === 2 && st.unit === 'weeks')) st.p = 'custom'; draw(); }
+    });
+    root.addEventListener('change', (e) => {
+      const t = e.target;
+      if (t.dataset.mt) {
+        const [kind, key] = t.dataset.mt.split(':');
+        if (kind === 'day') st.dayTimes[+key] = t.value;
+        if (kind === 'wd') st.dayT[+key] = t.value;
+        if (kind === 'md') st.dateT[+key] = t.value;
+        if (kind === 'every') st.time = t.value;
+      }
+      if (t.matches('[data-munit]')) { st.unit = t.value; st.p = st.every === 2 && st.unit === 'weeks' ? '2wk' : 'custom'; draw(); return; }
+      if (t.matches('[data-mstart]')) st.start = t.value || todayYmd();
+      const sum = root.querySelector('.msum'); if (sum) sum.textContent = medSummary(st);
+    });
+  }
+  function medPickerSchedule(st, startDefault) {
+    const k = MED_KIND[st.p];
+    const out = { weekdays: '', month_days: null, dose_times: null, start_date: startDefault };
+    if (k === 'day') return { ...out, freq: 'daily', interval_n: 1, times: [...new Set(st.dayTimes.filter(Boolean))].sort().join(',') };
+    if (k === 'week') {
+      if (!st.days.length) return { error: 'Pick at least one day' };
+      const dt = Object.fromEntries(st.days.map((d) => [d, st.dayT[d] || '08:00']));
+      return { ...out, freq: 'weekly', interval_n: 1, weekdays: [...st.days].sort().join(','), dose_times: dt, times: Object.values(dt).sort()[0] };
+    }
+    if (k === 'month') {
+      if (!st.dates.length) return { error: 'Pick at least one date' };
+      const dt = Object.fromEntries(st.dates.map((d) => [d, st.dateT[d] || '08:00']));
+      return { ...out, freq: 'monthly', interval_n: 1, month_days: [...st.dates].sort((a, b) => a - b).join(','), dose_times: dt, times: Object.values(dt).sort()[0] };
+    }
+    const start = parseDay(st.start);
+    const r = { ...out, interval_n: st.every, times: st.time || '08:00', start_date: st.start, freq: { days: 'daily', weeks: 'weekly', months: 'monthly' }[st.unit] };
+    if (st.unit === 'weeks') r.weekdays = String(start.getDay());
+    if (st.unit === 'months') r.month_days = String(start.getDate());
+    return r;
+  }
+
   function openMed(m) {
     const st = medState(m);
     let hist = '';
@@ -1309,64 +1483,14 @@ import * as RW from './rewards.js';
       form.querySelector('.msum').textContent = medSummary(st);
     };
     draw();
-    // Chips, day and date toggles, steppers (the chip follows how many you pick)
-    form.addEventListener('click', (e) => {
-      const b = e.target.closest('button');
-      if (!b || !form.contains(b)) return;
-      if (b.dataset.mp) { medPick(st, b.dataset.mp); draw(); return; }
-      if (b.dataset.mday !== undefined) {
-        const d = +b.dataset.mday;
-        st.days = st.days.includes(d) ? st.days.filter((x) => x !== d) : [...st.days, d];
-        if (st.days.includes(d)) st.dayT[d] = st.dayT[d] || st.dayT[st.days[0]] || st.time || '08:00';
-        st.p = st.days.length === 1 ? 'weekly' : '2week'; draw(); return;
-      }
-      if (b.dataset.mdate) {
-        const d = +b.dataset.mdate;
-        st.dates = st.dates.includes(d) ? st.dates.filter((x) => x !== d) : [...st.dates, d];
-        if (st.dates.includes(d)) st.dateT[d] = st.dateT[d] || st.dateT[st.dates[0]] || st.time || '08:00';
-        st.p = st.dates.length === 1 ? 'monthly' : '2month'; draw(); return;
-      }
-      if (b.dataset.madd) { st.dayTimes.push(st.dayTimes.length === 1 ? '20:00' : '12:00'); st.p = '2day'; draw(); return; }
-      if (b.dataset.mrm !== undefined) { st.dayTimes.splice(+b.dataset.mrm, 1); st.p = st.dayTimes.length > 1 ? '2day' : 'daily'; draw(); return; }
-      if (b.dataset.mstep) { st.every = Math.min(52, Math.max(1, st.every + +b.dataset.mstep)); if (st.p === '2wk' && !(st.every === 2 && st.unit === 'weeks')) st.p = 'custom'; draw(); }
-    });
-    form.addEventListener('change', (e) => {
-      const t = e.target;
-      if (t.dataset.mt) {
-        const [kind, key] = t.dataset.mt.split(':');
-        if (kind === 'day') st.dayTimes[+key] = t.value;
-        if (kind === 'wd') st.dayT[+key] = t.value;
-        if (kind === 'md') st.dateT[+key] = t.value;
-        if (kind === 'every') st.time = t.value;
-      }
-      if (t.matches('[data-munit]')) { st.unit = t.value; st.p = st.every === 2 && st.unit === 'weeks' ? '2wk' : 'custom'; draw(); return; }
-      if (t.matches('[data-mstart]')) st.start = t.value || todayYmd();
-      form.querySelector('.msum').textContent = medSummary(st);
-    });
+    bindMedPicker(form, st, draw);
     form.onsubmit = async (e) => {
       e.preventDefault();
       const f = new FormData(form);
       const k = MED_KIND[st.p];
-      const body = { name: f.get('name').trim(), dose: f.get('dose').trim() || null, notes: f.get('notes').trim() || null, remind: f.get('remind'),
-        weekdays: '', month_days: null, dose_times: null, start_date: m.start_date || todayYmd() };
-      if (k === 'day') Object.assign(body, { freq: 'daily', interval_n: 1, times: [...new Set(st.dayTimes.filter(Boolean))].sort().join(',') });
-      if (k === 'week') {
-        if (!st.days.length) { toast('Pick at least one day'); return; }
-        const dt = Object.fromEntries(st.days.map((d) => [d, st.dayT[d] || '08:00']));
-        Object.assign(body, { freq: 'weekly', interval_n: 1, weekdays: [...st.days].sort().join(','), dose_times: dt, times: Object.values(dt).sort()[0] });
-      }
-      if (k === 'month') {
-        if (!st.dates.length) { toast('Pick at least one date'); return; }
-        const dt = Object.fromEntries(st.dates.map((d) => [d, st.dateT[d] || '08:00']));
-        Object.assign(body, { freq: 'monthly', interval_n: 1, month_days: [...st.dates].sort((a, b) => a - b).join(','), dose_times: dt, times: Object.values(dt).sort()[0] });
-      }
-      if (k === 'every') {
-        const start = parseDay(st.start);
-        Object.assign(body, { interval_n: st.every, times: st.time || '08:00', start_date: st.start,
-          freq: { days: 'daily', weeks: 'weekly', months: 'monthly' }[st.unit] });
-        if (st.unit === 'weeks') body.weekdays = String(start.getDay());
-        if (st.unit === 'months') body.month_days = String(start.getDate());
-      }
+      const sch = medPickerSchedule(st, m.start_date || todayYmd());
+      if (sch.error) { toast(sch.error); return; }
+      const body = { name: f.get('name').trim(), dose: f.get('dose').trim() || null, notes: f.get('notes').trim() || null, remind: f.get('remind'), ...sch };
       try {
         if (m.id) await api(`/api/meds/${m.id}`, { method: 'PATCH', body }); else await api('/api/meds', { body });
         sheet.close(); await refresh(); toast('Saved');
@@ -1576,8 +1700,8 @@ import * as RW from './rewards.js';
       </div>
       <div class="setting">
         <strong>Habits</strong>
-        <p>${(data.habits || []).length ? esc(data.habits.map((h) => h.name).join(', ')) : 'None yet. Add a few small daily things to check off on Today.'}</p>
-        <div class="btns"><button type="button" class="btn ghost" data-act="edit-habits">${(data.habits || []).length ? 'Edit habits' : 'Add habits'}</button>
+        <p>${myHabits().length ? esc(myHabits().map((h) => h.title).join(', ')) : 'None yet. Add a few small daily things to check off on Today.'}</p>
+        <div class="btns"><button type="button" class="btn ghost" data-act="edit-habits">${myHabits().length ? 'Edit habits' : 'Add habits'}</button>
         <button type="button" class="btn ghost" data-act="focus-free" data-min="25">Start a 25-min focus</button></div>
       </div>
       <div class="setting">
@@ -2503,6 +2627,15 @@ import * as RW from './rewards.js';
   app.addEventListener('pointerup', endSwipe);
   app.addEventListener('pointercancel', endSwipe);
   app.addEventListener('click', (e) => { if (suppressClick) { e.stopPropagation(); e.preventDefault(); } }, true);
+  // Press and hold a habit to open its streak, history and schedule
+  let holdTimer = null;
+  app.addEventListener('pointerdown', (e) => {
+    const h = e.target.closest('.habit'); if (!h) return;
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => { suppressClick = true; setTimeout(() => { suppressClick = false; }, 400); const t = taskById(+h.dataset.id); if (t) openTask(t); }, 500);
+  });
+  ['pointerup', 'pointercancel', 'pointerleave', 'pointermove'].forEach((ev) => app.addEventListener(ev, (e) => { if (ev !== 'pointermove' || Math.abs(e.movementX) + Math.abs(e.movementY) > 6) clearTimeout(holdTimer); }));
+  app.addEventListener('contextmenu', (e) => { if (e.target.closest('.habit')) e.preventDefault(); });
 
   app.addEventListener('click', async (e) => {
     const el = e.target.closest('[data-act]');
@@ -2567,11 +2700,13 @@ import * as RW from './rewards.js';
       else if (act === 'doc') openDocument(data.documents.find((d) => d.id === id));
       else if (act === 'new-doc') openDocument({ name: '', remind_months: 9 });
       else if (act === 'habit') {
-        const hname = (data.habits.find((x) => x.id === id) || {}).name || 'Habit';
-        const res = await api(`/api/habits/${id}/toggle`, { body: { date: todayYmd() } });
-        const undo = remember(`${res.done ? 'Checked' : 'Unchecked'} ${hname}`, { k: 'habit', id, date: todayYmd() });
+        const t = taskById(id); const o = t && taskOcc(t);
+        if (!o) return;
+        const was = !!(o.log && o.log.status !== 'skipped');
+        await api(`/api/tasks/${id}/log`, { body: { occ: o.key, status: was ? 'undo' : 'done' } });
+        const undo = remember(`${was ? 'Unchecked' : 'Checked'} ${t.title}`, { k: 'habit', id, occ: o.key, was });
         await refresh();
-        if (res.done) { const s = habitStreak(id); toast(s > 1 ? `Nice: ${s} days in a row` : 'Checked off', undo); }
+        if (!was) { const s = streakOf(taskById(id)).current; toast(s > 1 ? `Nice: ${s} in a row 🔥` : 'Checked off', undo); }
       } else if (act === 'edit-habits') openHabits();
       else if (act === 'event') openEvent(data.events.find((x) => x.id === id));
       else if (act === 'trip-open') openTrip(data.trips.find((x) => x.id === id));

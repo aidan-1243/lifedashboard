@@ -7,6 +7,7 @@ import { slotsOn } from '../public/meds.js';
 import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS } from '../public/home.js';
 import { sendWebPush } from './webpush.js';
 import * as RW from '../public/rewards.js';
+import * as TK from '../public/tasks.js';
 
 const ITEM_FIELDS = ['title', 'notes', 'area', 'kind', 'due_at', 'nag', 'repeat_days', 'top3', 'person_id', 'status', 'snooze_until', 'shared'];
 const PERSON_FIELDS = ['name', 'birthday', 'phone', 'email', 'notes', 'checkin_days', 'last_contact_at', 'last_contact_how', 'bday_remind', 'bday_notify', 'circle'];
@@ -175,6 +176,7 @@ async function owns(env, table, id, uid) {
     items: 'SELECT 1 AS ok FROM items WHERE id = ? AND (user_id = ? OR shared = 1)',
     people: 'SELECT 1 AS ok FROM people WHERE id = ? AND user_id = ?',
     habits: 'SELECT 1 AS ok FROM habits WHERE id = ? AND user_id = ?',
+    tasks: 'SELECT 1 AS ok FROM tasks WHERE id = ? AND (user_id = ? OR shared = 1)',
     meds: 'SELECT 1 AS ok FROM meds WHERE id = ? AND user_id = ?',
     documents: 'SELECT 1 AS ok FROM documents WHERE id = ? AND user_id = ?',
     gifts: 'SELECT 1 AS ok FROM gifts g JOIN people p ON p.id = g.person_id WHERE g.id = ? AND p.user_id = ?',
@@ -390,7 +392,7 @@ async function handleApi(req, env, url, ctx, uid) {
     const evs = events.results.map((e) => ({ ...e, ...eventKeys(e), pref: eventPref(e, prefs, settings) }));
     return json({ items: items.results, people: people.results, events: evs, event_prefs: eventPrefs.results, trips: trips.results, documents: documents.results,
       habits: habits.results, habit_logs: habitLogs.results, gifts: gifts.results, person_dates: personDates.results, meds: meds.results, med_logs: medLogs.results, home_tasks: homeTasks.results, home_log: homeLog.results, meals: meals.results, meal_titles: mealTitles.results, settings, tz: env.TZ || 'America/Chicago', auth: env.ACCESS_AUD ? 'access' : 'password',
-      me, users: users.map((u) => ({ id: u.id, name: u.name })), rewards: await loadRewards(env),
+      me, users: users.map((u) => ({ id: u.id, name: u.name })), rewards: await loadRewards(env), ...(await loadTasks(env, uid)),
       push: { public_key: env.VAPID_PUBLIC || '', devices: (await env.DB.prepare('SELECT device, created_at, last_ok_at, last_error, endpoint FROM push_subs WHERE user_id = ?').bind(uid).all()).results } });
   }
 
@@ -719,6 +721,38 @@ async function handleApi(req, env, url, ctx, uid) {
     delete out.weather_cache;
     return json(out);
   }
+  // ---------- Tasks (the one task model; see docs/tasks-design.md) ----------
+  if (path === '/api/tasks' && method === 'POST') {
+    const data = taskFields(body || {});
+    if (!data.title) return json({ error: 'title required' }, 400);
+    const max = await env.DB.prepare('SELECT COALESCE(MAX(sort), 0) AS s FROM tasks WHERE user_id = ? AND kind = ?').bind(uid, data.kind || 'task').first();
+    const row = await insertRow(env, 'tasks', { kind: 'task', repeat: 'never', ...data, user_id: uid, sort: max.s + 1, created_at: nowIso(),
+      date: data.date || localParts(new Date(), env.TZ || 'America/Chicago').date });
+    return json(taskOut(row), 201);
+  }
+  if ((m = /^\/api\/tasks\/(\d+)(\/log|\/snooze)?$/.exec(path)) && !(await owns(env, 'tasks', +m[1], uid))) return notYours();
+  if ((m = /^\/api\/tasks\/(\d+)$/.exec(path))) {
+    if (method === 'PATCH') return json(taskOut(await updateRow(env, 'tasks', +m[1], taskFields(body || {}))));
+    if (method === 'DELETE') { await env.DB.prepare('UPDATE tasks SET archived = 1 WHERE id = ?').bind(+m[1]).run(); return json({ ok: true }); }
+  }
+  if ((m = /^\/api\/tasks\/(\d+)\/log$/.exec(path)) && method === 'POST') {
+    const occ = String((body && body.occ) || '');
+    if (!/^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(occ)) return json({ error: 'occ required' }, 400);
+    const status = body.status;
+    if (status === 'undo') { await env.DB.prepare('DELETE FROM task_log WHERE task_id = ? AND occ = ?').bind(+m[1], occ).run(); return json({ ok: true }); }
+    if (!['done', 'partial', 'skipped'].includes(status)) return json({ error: 'status must be done, partial, skipped or undo' }, 400);
+    await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, amount, at, by_user) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(task_id, occ) DO UPDATE SET status = excluded.status, amount = excluded.amount, at = excluded.at, by_user = excluded.by_user`)
+      .bind(+m[1], occ, status, body.amount == null ? null : +body.amount || 0, nowIso(), uid).run();
+    await env.DB.prepare('UPDATE tasks SET snooze_until = NULL WHERE id = ?').bind(+m[1]).run();
+    return json({ ok: true });
+  }
+  if ((m = /^\/api\/tasks\/(\d+)\/snooze$/.exec(path)) && method === 'POST') {
+    const minutes = Math.min(7 * 1440, Math.max(5, +(body && body.minutes) || 60));
+    await env.DB.prepare('UPDATE tasks SET snooze_until = ? WHERE id = ?').bind(new Date(Date.now() + minutes * 60000).toISOString(), +m[1]).run();
+    return json({ ok: true });
+  }
+
   // ---------- Rewards (shared by the household) ----------
   if (path === '/api/rewards/logs' && method === 'POST') {
     const b = body || {};
@@ -805,8 +839,8 @@ async function handleApi(req, env, url, ctx, uid) {
         contact_log: await all(`SELECT * FROM contact_log WHERE person_id IN (${people})`, uid),
         gifts: await all(`SELECT * FROM gifts WHERE person_id IN (${people})`, uid),
         person_dates: await all(`SELECT * FROM person_dates WHERE person_id IN (${people})`, uid),
-        habits: await all('SELECT * FROM habits WHERE user_id = ?', uid),
-        habit_logs: await all('SELECT l.* FROM habit_logs l JOIN habits h ON h.id = l.habit_id WHERE h.user_id = ?', uid),
+        tasks: await all('SELECT * FROM tasks WHERE user_id = ? OR shared = 1', uid),
+        task_log: await all('SELECT l.* FROM task_log l JOIN tasks t ON t.id = l.task_id WHERE t.user_id = ? OR t.shared = 1', uid),
         meds: await all('SELECT * FROM meds WHERE user_id = ?', uid),
         med_logs: await all('SELECT l.* FROM med_logs l JOIN meds m ON m.id = l.med_id WHERE m.user_id = ?', uid),
         documents: await all('SELECT * FROM documents WHERE user_id = ?', uid),
@@ -1148,6 +1182,7 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
   report.sent.push(...await sendMedReminders(env, tz, local, quiet, now, uid));
   report.sent.push(...await sendHomeReminders(env, tz, local, quiet, now, uid));
   report.sent.push(...await sendRewardsReminders(env, tz, local, now, uid));
+  report.sent.push(...await sendTaskReminders(env, tz, local, quiet, now, uid));
   const wrapHour = s.wrap_hour === '' || s.wrap_hour === undefined ? 21 : +s.wrap_hour;
   if (wrapHour >= 0 && local.h === wrapHour && s.last_wrap !== local.date) {
     await sendWrapUp(env, tz, local, uid);
@@ -1219,6 +1254,85 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
     if (ok) await markSent([item]);
   }
   return report;
+}
+
+// ---------- Tasks ----------
+const TASK_REPEATS = ['never', 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'yearly', 'custom'];
+function taskFields(b) {
+  const out = {};
+  const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '') ? v : null);
+  if ('title' in b) out.title = String(b.title || '').trim().slice(0, 120);
+  if ('kind' in b) out.kind = ['task', 'habit'].includes(b.kind) ? b.kind : 'task';
+  if ('details' in b) out.details = b.details && typeof b.details === 'object' ? JSON.stringify(b.details).slice(0, 4000) : null;
+  if ('date' in b) out.date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : null;
+  if ('time' in b) out.time = hhmm(b.time);
+  if ('repeat' in b) out.repeat = TASK_REPEATS.includes(b.repeat) ? b.repeat : 'never';
+  if ('custom' in b) {
+    const c = b.custom && typeof b.custom === 'object' ? b.custom : null;
+    out.custom = c ? JSON.stringify({ freq: ['daily', 'weekly', 'monthly'].includes(c.freq) ? c.freq : 'daily', interval_n: Math.min(52, Math.max(1, Math.round(+c.interval_n) || 1)),
+      weekdays: String(c.weekdays || '').split(',').filter((x) => /^[0-6]$/.test(x)).join(',') || null,
+      month_days: String(c.month_days || '').split(',').map(Number).filter((x) => x >= 1 && x <= 31).join(',') || null,
+      times: String(c.times || '').split(',').map((x) => hhmm(x)).filter(Boolean).join(',') || null,
+      dose_times: c.dose_times && typeof c.dose_times === 'object' ? Object.fromEntries(Object.entries(c.dose_times).filter(([k, v]) => /^\d{1,2}$/.test(k) && hhmm(v))) : null }) : null;
+  }
+  if ('nag' in b) out.nag = b.nag ? 1 : 0;
+  if ('nag_mode' in b) out.nag_mode = ['hourly', 'daily', 'weekly'].includes(b.nag_mode) ? b.nag_mode : 'hourly';
+  if ('nag_time' in b) out.nag_time = hhmm(b.nag_time);
+  if ('nag_dow' in b) out.nag_dow = b.nag_dow === null || b.nag_dow === '' ? null : Math.min(6, Math.max(0, Math.round(+b.nag_dow) || 0));
+  if ('remind_to' in b) out.remind_to = b.remind_to === null || b.remind_to === '' ? null : Math.max(0, Math.round(+b.remind_to) || 0);
+  if ('shared' in b) out.shared = b.shared ? 1 : 0;
+  if ('sort' in b) out.sort = Math.round(+b.sort) || 0;
+  return out;
+}
+const taskOut = (t) => (t ? { ...t, details: t.details ? JSON.parse(t.details) : null, custom: t.custom ? JSON.parse(t.custom) : null } : t);
+async function loadTasks(env, uid) {
+  const { results } = await env.DB.prepare('SELECT * FROM tasks WHERE archived = 0 AND (user_id = ? OR shared = 1) ORDER BY sort, id').bind(uid).all();
+  const ids = results.map((t) => t.id);
+  const logs = ids.length ? (await env.DB.prepare(`SELECT task_id, occ, status, amount, at FROM task_log WHERE task_id IN (${ids.map(() => '?').join(',')}) AND occ >= date('now', '-750 days')`).bind(...ids).all()).results : [];
+  return { tasks: results.map(taskOut), task_log: logs };
+}
+
+// Nag until done: hourly, daily at a time, or weekly on a day. Only for today's occurrences
+// (and a one-off task whose date has passed); snoozes and quiet hours are respected.
+async function sendTaskReminders(env, tz, local, quiet, now, uid) {
+  const { results } = await env.DB.prepare(`SELECT * FROM tasks WHERE archived = 0 AND nag = 1
+    AND ((remind_to IS NULL AND user_id = ?) OR remind_to = ? OR (remind_to = 0 AND (user_id = ? OR shared = 1)))`).bind(uid, uid, uid).all();
+  if (!results.length) return [];
+  const tasks = results.map(taskOut);
+  const ids = tasks.map((t) => t.id);
+  const done = new Set((await env.DB.prepare(`SELECT task_id, occ FROM task_log WHERE task_id IN (${ids.map(() => '?').join(',')}) AND occ >= ?`).bind(...ids, TK.addDays(local.date, -400)).all()).results.map((l) => `${l.task_id}|${l.occ}`));
+  const minutesNow = local.h * 60 + local.min;
+  const dow = new Date(Date.UTC(local.y, local.m - 1, local.d)).getUTCDay();
+  const sent = [];
+  for (const t of tasks) {
+    if (t.snooze_until && Date.parse(t.snooze_until) > now) continue;
+    const occs = TK.occurrencesOn(t, local.date).map((tm) => ({ key: TK.occKey(local.date, tm), tm }));
+    if ((!t.repeat || t.repeat === 'never') && t.date && t.date < local.date) occs.push({ key: TK.occKey(t.date, t.time || ''), tm: '', late: true });
+    const open = occs.filter((o) => !done.has(`${t.id}|${o.key}`) && (o.late || !o.tm || minutesNow >= +o.tm.slice(0, 2) * 60 + +o.tm.slice(3)));
+    if (!open.length) continue;
+    let key;
+    if (t.nag_mode === 'daily' || t.nag_mode === 'weekly') {
+      const [h, mi] = String(t.nag_time || '09:00').split(':').map(Number);
+      if (minutesNow < h * 60 + mi) continue;
+      if (t.nag_mode === 'weekly' && dow !== (t.nag_dow ?? 1)) continue;
+      key = `task:${t.id}:${uid}:${local.date}`;
+      if (await env.DB.prepare('SELECT 1 FROM task_nags WHERE key = ?').bind(key).first()) continue;
+    } else {
+      if (quiet) continue;
+      if (open.every((o) => !o.tm && !o.late) && minutesNow < 9 * 60) continue; // date-only: start at 9am
+      key = `task:${t.id}:${uid}:hourly`;
+      const nag = await env.DB.prepare('SELECT last_at FROM task_nags WHERE key = ?').bind(key).first();
+      if (nag && (now - Date.parse(nag.last_at)) / 60000 < 58) continue;
+    }
+    const o = open[0];
+    const when = o.late ? `was due ${o.key.slice(5, 10).replace('-', '/')}` : o.tm ? `at ${o.tm}` : 'today';
+    const ok = await push(env, { to: uid, tag: `task-${t.id}`, title: t.title, message: `${t.kind === 'habit' ? 'Habit' : 'Task'} · ${when}`, priority: 4 });
+    if (ok) {
+      await env.DB.prepare('INSERT INTO task_nags (key, last_at) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET last_at = excluded.last_at, count = task_nags.count + 1').bind(key, now.toISOString()).run();
+      sent.push(key);
+    }
+  }
+  return sent;
 }
 
 // ---------- Rewards reminders ----------
@@ -1445,8 +1559,8 @@ async function sendWrapUp(env, tz, local, uid = 1) {
   const [done, left, habits, habitDone] = await Promise.all([
     env.DB.prepare('SELECT COUNT(*) AS n FROM items WHERE user_id = ? AND done_at >= ?').bind(uid, dayStart).first(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM items WHERE user_id = ? AND status = 'open' AND kind = 'task' AND due_at <= ?").bind(uid, dayEnd).first(),
-    env.DB.prepare('SELECT COUNT(*) AS n FROM habits WHERE user_id = ? AND archived = 0').bind(uid).first(),
-    env.DB.prepare('SELECT COUNT(*) AS n FROM habit_logs l JOIN habits h ON h.id = l.habit_id WHERE h.user_id = ? AND l.date = ?').bind(uid, local.date).first(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM tasks WHERE user_id = ? AND kind = 'habit' AND archived = 0").bind(uid).first(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM task_log l JOIN tasks t ON t.id = l.task_id WHERE t.user_id = ? AND t.kind = 'habit' AND l.occ = ? AND l.status IN ('done','partial')").bind(uid, local.date).first(),
   ]);
   const lines = [`${done.n} done today`];
   if (left.n) lines.push(`${left.n} still open: tap to move ${left.n === 1 ? 'it' : 'them'} to tomorrow`);
