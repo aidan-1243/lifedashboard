@@ -816,6 +816,7 @@ async function handleApi(req, env, url, ctx, uid) {
     let owner = card.owner;
     if ('owner' in b && (await env.DB.prepare('SELECT 1 FROM users WHERE id = ?').bind(+b.owner).first())) owner = +b.owner;
     await env.DB.prepare('UPDATE rw_cards SET data = ?, owner = ?, updated_at = ? WHERE id = ?').bind(JSON.stringify(next), owner, nowIso(), card.id).run();
+    await syncCreditTasks(env);
     return json({ ok: true });
   }
   if (path === '/api/rewards/cards' && method === 'POST') {
@@ -827,10 +828,12 @@ async function handleApi(req, env, url, ctx, uid) {
     const data = { name, issuer: b.issuer ? String(b.issuer).slice(0, 40) : '', mark: String(b.issuer || name).slice(0, 5).toUpperCase(), art: 'slate',
       fee: Math.max(0, Math.round(+b.fee || 0)), renews: /^\d{4}-\d{2}-\d{2}$/.test(b.renews || '') ? b.renews : null, currency: b.currency || 'CASH', benefits: [], hidden: [], certs: [] };
     await env.DB.prepare('INSERT INTO rw_cards (id, owner, data, updated_at) VALUES (?, ?, ?, ?)').bind(id, owner, JSON.stringify(data), nowIso()).run();
+    await syncCreditTasks(env);
     return json({ ok: true, id }, 201);
   }
   if ((m = /^\/api\/rewards\/cards\/([\w-]+)$/.exec(path)) && method === 'DELETE') {
     await env.DB.batch([env.DB.prepare('DELETE FROM rw_cards WHERE id = ?').bind(m[1]), env.DB.prepare('DELETE FROM rw_logs WHERE card_id = ?').bind(m[1])]);
+    await syncCreditTasks(env);
     return json({ ok: true });
   }
   // Point balances: { user, program, balance } (0 removes it)
@@ -1202,6 +1205,7 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
   // Birthdays, important dates and catch-ups are tasks now (synced from People; reminders come
   // from sendTaskReminders). Only the gift nudge is still generated here.
   if (!s.people_tasks_v1) { await syncPeopleTasks(env, uid); await setSetting(env, 'people_tasks_v1', nowIso(), uid); }
+  if (uid === 1 && !s.credit_tasks_v1) { await syncCreditTasks(env); await setSetting(env, 'credit_tasks_v1', nowIso(), 1); }
   await ensurePeopleReminders(env, tz, local, uid);
   // Medications are tasks now (sendTaskReminders); sendMedReminders is kept for reference only.
   report.sent.push(...await sendHomeReminders(env, tz, local, quiet, now, uid));
@@ -1319,6 +1323,29 @@ async function saveHomeTask(env, id, f, uid) {
   return (await loadHome(env)).tasks.find((t) => t.id === id) || { ok: true };
 }
 
+// ---------- Credits -> tasks ----------
+// Each credit (a card benefit of kind "credit" you track) is a task owned by the card's owner.
+// The money stays in rw_logs (several uses per period, notes, totals); the task holds your
+// reminder choices and puts the credit on the same footing as everything else.
+const CREDIT_REPEAT = { monthly: 'monthly', quarterly: 'quarterly', semiannual: 'semiannual', annual: 'yearly', anniversary: 'yearly', '4yr': 'yearly' };
+async function syncCreditTasks(env) {
+  const rw = await loadRewards(env);
+  const want = [];
+  for (const c of rw.cards) for (const b of RW.visibleBenefits(c)) {
+    if (b.kind !== 'credit') continue;
+    want.push({ ref: `credit:${c.id}:${b.id}`, owner: c.owner, title: b.name, repeat: CREDIT_REPEAT[b.period] || 'yearly',
+      details: { card_id: c.id, benefit_id: b.id, card_name: c.name, amount: +b.amount || 0, period: b.period } });
+  }
+  const stmts = want.map((w) => env.DB.prepare(`INSERT INTO tasks (user_id, kind, title, details, date, repeat, nag, nag_mode, archived, legacy_ref, created_at)
+      VALUES (?, 'credit', ?, ?, '2026-01-01', ?, 1, 'daily', 0, ?, ?)
+      ON CONFLICT(legacy_ref) DO UPDATE SET user_id = excluded.user_id, title = excluded.title, repeat = excluded.repeat, archived = 0,
+        details = json_patch(COALESCE(tasks.details, '{}'), excluded.details)`)
+    .bind(w.owner, w.title, JSON.stringify(w.details), w.repeat, w.ref, nowIso()));
+  stmts.push(env.DB.prepare("UPDATE tasks SET archived = 1 WHERE kind = 'credit' AND legacy_ref NOT IN (SELECT value FROM json_each(?))").bind(JSON.stringify(want.map((w) => w.ref))));
+  for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
+  return want.length;
+}
+
 // ---------- People -> tasks ----------
 // Each person's birthday (if shown), important dates and catch-up become tasks, kept in step with
 // the People data. Your reminder choices on a task are kept; the person page's checkboxes set them.
@@ -1363,7 +1390,7 @@ function taskFields(b) {
   const out = {};
   const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '') ? v : null);
   if ('title' in b) out.title = String(b.title || '').trim().slice(0, 120);
-  if ('kind' in b) out.kind = ['task', 'habit', 'med', 'home', 'birthday', 'pdate', 'catchup'].includes(b.kind) ? b.kind : 'task';
+  if ('kind' in b) out.kind = ['task', 'habit', 'med', 'home', 'birthday', 'pdate', 'catchup', 'credit'].includes(b.kind) ? b.kind : 'task';
   if ('details' in b) out.details = b.details && typeof b.details === 'object' ? JSON.stringify(b.details).slice(0, 4000) : null;
   if ('date' in b) out.date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : null;
   if ('time' in b) out.time = hhmm(b.time);
@@ -1397,7 +1424,7 @@ async function loadTasks(env, uid) {
 // Nag until done: hourly, daily at a time, or weekly on a day. Only for today's occurrences
 // (and a one-off task whose date has passed); snoozes and quiet hours are respected.
 async function sendTaskReminders(env, tz, local, quiet, now, uid) {
-  const { results } = await env.DB.prepare(`SELECT * FROM tasks WHERE archived = 0 AND nag = 1 AND kind != 'home'
+  const { results } = await env.DB.prepare(`SELECT * FROM tasks WHERE archived = 0 AND nag = 1 AND kind NOT IN ('home', 'credit')
     AND ((remind_to IS NULL AND user_id = ?) OR remind_to = ? OR (remind_to = 0 AND (user_id = ? OR shared = 1)))`).bind(uid, uid, uid).all();
   if (!results.length) return [];
   const tasks = results.map(taskOut);
@@ -1460,7 +1487,11 @@ async function sendRewardsReminders(env, tz, local, now, uid) {
   const s = await getSettings(env, uid);
   const key = `rw:${uid}:${local.date}`;
   if (local.h >= Math.max(8, +s.briefing_hour || 8) && !(await env.DB.prepare('SELECT 1 FROM home_nags WHERE key = ?').bind(key).first())) {
-    const soon = RW.openCredits(ctx, mine).filter((x) => x.dated && x.days <= 3).sort((a, z) => a.days - z.days || z.left - a.left);
+    // Each credit's task says whether to remind and how many days before it ends (default 3)
+    const prefs = Object.fromEntries((await env.DB.prepare("SELECT legacy_ref, nag, details FROM tasks WHERE kind = 'credit' AND user_id = ? AND archived = 0").bind(uid).all()).results
+      .map((r) => [r.legacy_ref, { nag: r.nag, lead: (JSON.parse(r.details || '{}').lead) || 3 }]));
+    const pref = (x) => prefs[`credit:${x.c.id}:${x.b.id}`] || { nag: 1, lead: 3 };
+    const soon = RW.openCredits(ctx, mine).filter((x) => x.dated && pref(x).nag && x.days <= pref(x).lead).sort((a, z) => a.days - z.days || z.left - a.left);
     if (soon.length) {
       const total = soon.reduce((a, x) => a + x.left, 0);
       const ok = await push(env, { to: uid, tag: 'rw-credits', priority: 4, click: `${env.PUBLIC_URL}/#rewards`,

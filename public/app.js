@@ -308,6 +308,7 @@ import * as TK from './tasks.js';
     clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
     repeat: '<path d="M4 9a5 5 0 0 1 5-5h9l-3-3M20 15a5 5 0 0 1-5 5H6l3 3"/>',
     chat: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/>',
+    card: '<rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 10h19M6.5 15h4"/>',
   };
   const kindMark = (k, cls = '') => `<span class="evmark ${cls}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${KIND_ICONS[k]}</svg></span>`;
 
@@ -2044,7 +2045,7 @@ import * as TK from './tasks.js';
     form.querySelectorAll('[data-rw]').forEach((el) => { el.onclick = async () => {
       const a = el.dataset.rw;
       try {
-        if (a === 'ben') openRwBenefit(c.id, el.dataset.ben);
+        if (a === 'ben') openCreditTask(c.id, el.dataset.ben);
         else if (a === 'edit') { form.classList.add('editing'); sheet.scrollTop = 0; }
         else if (a === 'back') form.classList.remove('editing');
         else if (a === 'remove') { if (!confirm(`Remove ${c.name} and its history?`)) return; await api(`/api/rewards/cards/${encodeURIComponent(c.id)}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Card removed'); }
@@ -2122,6 +2123,117 @@ import * as TK from './tasks.js';
     }; });
     form.querySelectorAll('[data-rwdel]').forEach((el) => { el.onclick = async () => {
       try { await api(`/api/rewards/logs/${el.dataset.rwdel}`, { method: 'DELETE' }); await refresh(); openRwBenefit(c.id, b.id); toast('Entry deleted'); } catch (err) { toast(err.message); }
+    }; });
+    showSheet();
+  }
+
+  // ----- Credits as tasks: the shared pop-up layout for one credit -----
+  // Periods for history and streaks: last year's and this year's, up to today.
+  function creditPeriods(c, b) {
+    const ctx = rwCtx(), today = startOfDay(), y = today.getFullYear();
+    const out = [];
+    for (const yy of [y - 1, y]) for (const p of RW.benUse(ctx, c, b, yy).per) {
+      if (p.info.start > today) continue;
+      const cur = p.info.start <= today && today <= p.info.end;
+      const status = p.used >= p.cap - 0.004 && p.cap > 0 ? 'done' : p.used > 0.004 ? 'partial' : RW.isSnoozed(c, b, p.info) ? 'skipped' : cur ? 'open' : 'missed';
+      if (!out.some((o) => o.key === p.info.key)) out.push({ key: p.info.key, label: p.info.label, end: p.info.end, status });
+    }
+    return out.sort((a, z) => a.end - z.end);
+  }
+  // Streak: periods in a row with any use (partial counts); this period only counts once used.
+  function creditStreak(c, b) {
+    const ps = creditPeriods(c, b);
+    let current = 0, best = 0, run = 0, still = true;
+    for (let i = ps.length - 1; i >= 0; i--) {
+      const st = ps[i].status;
+      if (st === 'open') continue;
+      if (st === 'done' || st === 'partial') { run++; if (still) current++; } else { still = false; best = Math.max(best, run); run = 0; }
+    }
+    return { current, best: Math.max(best, run), periods: ps };
+  }
+  const creditTask = (c, b) => (data.tasks || []).find((t) => t.kind === 'credit' && t.legacy_ref === `credit:${c.id}:${b.id}`);
+  const PERIOD_NOUN = { monthly: 'month', quarterly: 'quarter', semiannual: 'half', annual: 'year', anniversary: 'card year', '4yr': 'cycle' };
+
+  function openCreditTask(cardId, benId) {
+    const c = rwCard(cardId); const b = c && rwBen(c, benId);
+    if (!b) return;
+    if (b.kind !== 'credit') { openRwBenefit(cardId, benId); return; }
+    const ctx = rwCtx(), y = startOfDay().getFullYear();
+    const u = RW.benUse(ctx, c, b, y); const p = u.cur;
+    const left = p ? Math.max(0, p.cap - p.used) : 0;
+    const snoozed = p && RW.isSnoozed(c, b, p.info);
+    const back = p ? new Date(p.info.end.getFullYear(), p.info.end.getMonth(), p.info.end.getDate() + 1) : null;
+    const t = creditTask(c, b) || { details: {} };
+    const lead = (t.details && t.details.lead) || 3;
+    const st = creditStreak(c, b);
+    const strip = st.periods.slice(-12);
+    const yearUsed = u.total, yearCap = u.cap;
+    const noun = PERIOD_NOUN[b.period] || 'period';
+    const status = !p ? 'No current period' : left > 0.004 ? `${RW.money(left)} left · ends ${rwDate(p.info.end)}${snoozed ? ' · hidden this time' : ''}` : `Used · resets ${rwDate(back)}`;
+    const amountTxt = `${RW.money(b.amount)} ${(RW.PERIOD_LABEL[b.period] || '').toLowerCase()}${b.amounts ? ` (${Object.entries(b.amounts).map(([m, a]) => `${RW.money(a)} in ${RW.MONTHS[+m - 1]}`).join(', ')})` : ''}`;
+    sheet.innerHTML = `<form method="dialog" class="tk-sheet">
+      <div class="tk-head"><span class="tk-icon">${kindMark('card', 'k-credit')}</span>
+        <div class="tk-title"><h3>${esc(b.name)}</h3><p class="sub">${esc(status)}</p></div>${flame(st.current)}</div>
+      ${p ? `<div class="tk-main">
+        ${left > 0.004 ? `<button type="button" class="btn dark big" data-cr="all">Used ${esc(RW.money(left))}</button>
+        <div class="btns2"><button type="button" class="btn ghost" data-cr="part">Used part…</button><button type="button" class="btn ghost" data-cr="snooze">${snoozed ? 'Show it again' : `Not this ${esc(noun)}`}</button></div>`
+        : `<button type="button" class="btn ok big" data-cr="undo">✓ Used · Undo last</button>`}
+        <div class="tk-group tk-part" hidden>
+          <label class="tk-row tk-in"><span>Amount ($)</span><input name="amount" type="number" min="0.01" step="0.01" value="${left ? Math.round(left * 100) / 100 : ''}"></label>
+          <label class="tk-row"><span>Date</span><input name="date" type="date" value="${todayYmd()}" max="${todayYmd()}"></label>
+          <label class="tk-row tk-in"><span>Note</span><input name="note" maxlength="200" placeholder="Optional"></label>
+          <div class="tk-row"><span></span><button type="button" class="btn dark" data-cr="log">Log it</button></div>
+        </div>
+      </div>` : ''}
+      <div class="lbl">Details</div>
+      <div class="tk-group">
+        <button type="button" class="tk-row tk-link" data-cr="card"><span>${rwChip(c)} ${esc(rwOwner(c))}'s ${esc(c.name)}</span><span class="meta">Open ›</span></button>
+        <div class="tk-row"><span>Amount</span><span class="meta">${esc(amountTxt)}</span></div>
+        ${b.note ? `<div class="tk-row"><span class="meta">${esc(b.note)}</span></div>` : ''}
+      </div>
+      <div class="lbl">Schedule</div>
+      <div class="tk-group">
+        <div class="tk-row"><span>${kindMark('repeat')} Resets ${esc((RW.PERIOD_LABEL[b.period] || '').toLowerCase())}</span><span class="meta">${p ? `this one ends ${esc(rwDate(p.info.end))}` : ''}</span></div>
+        <button type="button" class="tk-row tk-link" data-cr="card"><span class="meta">Change amounts or turn it off on the card</span><span class="meta">›</span></button>
+      </div>
+      <div class="lbl">Reminders</div>
+      <div class="tk-group">
+        <label class="tk-row"><span>Remind me before it ends</span><input type="checkbox" class="tk-switch" name="nag"${t.nag !== 0 ? ' checked' : ''}></label>
+        <label class="tk-row tk-sub" data-crshow="nag"><span>Starting</span><select name="lead">${[[1, '1 day before'], [3, '3 days before'], [7, '7 days before'], [14, '14 days before']].map(([v, l]) => `<option value="${v}"${+lead === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+        <div class="tk-row" data-crshow="nag"><span>For</span><span class="meta">${esc(rwOwner(c))} (whose card it is)</span></div>
+      </div>
+      <div class="lbl">History</div>
+      <div class="tk-group">
+        <div class="tk-strip" role="img" aria-label="Recent periods">${strip.map((x) => `<i class="${x.status}" title="${esc(x.label || x.key)}: ${x.status}"></i>`).join('') || '<i class="open"></i>'}</div>
+        <div class="tk-row"><span class="meta">${RW.money(yearUsed)} of ${RW.money(yearCap)} this year · best ${st.best}</span><button type="button" class="link" data-cr="hist">All ›</button></div>
+        <div class="tk-all" hidden>${u.mine.slice().sort((a, z) => String(z.date || '').localeCompare(String(a.date || ''))).map((l) => `<div class="tk-row"><span>${RW.money(l.amount)}${l.kind === 'ytd' ? ' (year total)' : ''} · ${l.date ? esc(rwDate(RW.parseDate(l.date))) : ''}${l.note ? ` · ${esc(l.note)}` : ''}</span><button type="button" class="pbtn icon" data-crdel="${esc(l.id)}" aria-label="Delete this entry">×</button></div>`).join('') || '<div class="tk-row meta">Nothing logged this year</div>'}</div>
+      </div>
+      <div class="actions"><span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Close</button></div>
+    </form>`;
+    const form = sheet.querySelector('form');
+    const show = () => form.querySelectorAll('[data-crshow="nag"]').forEach((el) => { el.hidden = !form.nag.checked; });
+    show();
+    // Reminder changes save right away
+    form.addEventListener('change', async (e) => {
+      if (!['nag', 'lead'].includes(e.target.name) || !t.id) return;
+      show();
+      try { await api(`/api/tasks/${t.id}`, { method: 'PATCH', body: { nag: form.nag.checked ? 1 : 0, details: { ...(t.details || {}), lead: +form.lead.value } } }); await refresh(); toast('Saved'); } catch (err) { toast(err.message); }
+    });
+    form.querySelectorAll('[data-cr]').forEach((el) => { el.onclick = async () => {
+      const a = el.dataset.cr;
+      try {
+        if (a === 'all') { sheet.close(); await rwLog(c.id, b.id, Math.round(left * 100) / 100, todayYmd(), ''); }
+        else if (a === 'part') { const box = form.querySelector('.tk-part'); box.hidden = !box.hidden; if (!box.hidden) form.amount.focus(); }
+        else if (a === 'log') { const amt = +form.amount.value; if (!(amt > 0)) { toast('Enter an amount'); return; } await rwLog(c.id, b.id, amt, form.date.value || todayYmd(), form.note.value.trim()); openCreditTask(c.id, b.id); }
+        else if (a === 'snooze') { const sn = { ...(c.snoozed || {}) }; if (snoozed) delete sn[b.id]; else sn[b.id] = p.info.key; await rwPatch(c, { snoozed: sn }); sheet.close(); toast(snoozed ? 'Back in Credits' : `Hidden until ${rwDate(back)}`); }
+        else if (a === 'undo') { const lastLog = u.mine.filter((l) => l.period === p.info.key || (p.info.anniv && l.date && RW.parseDate(l.date) >= p.info.start)).sort((x, z) => String(z.date).localeCompare(String(x.date)) || String(z.id).localeCompare(String(x.id)))[0]; // newest first; same day: the later entry
+          if (lastLog) { await api(`/api/rewards/logs/${lastLog.id}`, { method: 'DELETE' }); await refresh(); openCreditTask(c.id, b.id); toast('Undone'); } }
+        else if (a === 'card') openRwCard(c.id);
+        else if (a === 'hist') { const box = form.querySelector('.tk-all'); box.hidden = !box.hidden; }
+      } catch (err) { toast(err.message); }
+    }; });
+    form.querySelectorAll('[data-crdel]').forEach((el) => { el.onclick = async () => {
+      try { await api(`/api/rewards/logs/${el.dataset.crdel}`, { method: 'DELETE' }); await refresh(); openCreditTask(c.id, b.id); toast('Entry deleted'); } catch (err) { toast(err.message); }
     }; });
     showSheet();
   }
@@ -2715,7 +2827,7 @@ import * as TK from './tasks.js';
     if (act === 'rw-who') { ui.rwWho = el.dataset.v; render(); return; }
     if (act === 'rw-type') { ui.rwType = el.dataset.v; render(); return; }
     if (act === 'rw-card') { openRwCard(el.dataset.id); return; }
-    if (act === 'rw-ben') { openRwBenefit(el.dataset.card, el.dataset.ben); return; }
+    if (act === 'rw-ben') { openCreditTask(el.dataset.card, el.dataset.ben); return; }
     if (act === 'rw-bal') { openRwBalance(+el.dataset.owner, el.dataset.prog); return; }
     if (act === 'rw-add-prog') { openRwBalance(+el.dataset.owner, null); return; }
     if (act === 'rw-add-card') { openRwAddCard(); return; }
