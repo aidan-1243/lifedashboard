@@ -1,0 +1,44 @@
+name = "life-dashboard"
+main = "src/worker.js"
+compatibility_date = "2025-06-01"
+
+# Static UI (index.html, app.js, style.css)
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# Every request goes through the worker so it can add security headers.
+run_worker_first = true
+
+# Database. After `npx wrangler d1 create life-dashboard`, paste the id it prints here.
+[[d1_databases]]
+binding = "DB"
+database_name = "life-dashboard"
+database_id = "245c5634-bab5-466b-851e-7592ad052514"
+
+# Runs every 15 minutes: sends nags, the morning briefing, etc.
+[triggers]
+crons = ["*/15 * * * *"]
+
+[vars]
+TZ = "America/Chicago"
+NTFY_SERVER = "https://ntfy.sh"
+# Set to your deployed URL (e.g. https://life-dashboard.<you>.workers.dev) so
+# Done/Snooze buttons on notifications can reach the app.
+PUBLIC_URL = "https://life-dashboard.lifedash-dxuk.workers.dev"
+# Cloudflare Access gate (the app double-checks Access's signed token).
+# Leave ACCESS_AUD empty in .dev.vars for local development.
+ACCESS_TEAM_DOMAIN = "sparkling-tree-e84d.cloudflareaccess.com"
+# Web Push (Life's own notifications): public half of the VAPID key pair. The private half is the
+# VAPID_PRIVATE_JWK secret (npx wrangler secret put VAPID_PRIVATE_JWK).
+VAPID_PUBLIC = "BGuA1tg9XE5pTQWui9kKHWJoJIQJROmto7x37LWcgDTwTNnpZcKN_-v61uyPT_ibmrw0kRLhPB-TLn4K5EjrFwk"
+ACCESS_AUD = "e171cb05241f7b07be71f1c03567266ba8b8877b4dbc76f89da446f1b4687779"
+
+# Secrets (never put these in this file):
+#   APP_TOKEN  - your password for the app and for Shortcuts
+#   NTFY_TOPIC - a long random topic name for your phone to subscribe to
+# Local dev: put them in .dev.vars. Production: `npx wrangler secret put APP_TOKEN`.
+
+[dev]
+ip = "localhost"   # the test copy is reachable only from this Mac
+port = 8787

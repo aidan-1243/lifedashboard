@@ -1,0 +1,9 @@
+{
+  "name": "Life Dashboard",
+  "short_name": "Life",
+  "start_url": "/#today",
+  "display": "standalone",
+  "background_color": "#FAF7FF",
+  "theme_color": "#FFE6DE",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

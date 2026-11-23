@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "life-dashboard",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/aidanmccoy/Documents/Claude/life-dashboard && PATH=$HOME/.local/node/bin:$PATH npx wrangler dev --test-scheduled --port 8787"],
+      "port": 8787
+    }
+  ]
+}
