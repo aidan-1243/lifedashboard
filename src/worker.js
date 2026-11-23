@@ -365,6 +365,7 @@ async function handleApi(req, env, url, ctx, uid) {
   let m;
 
   if (path === '/api/state' && method === 'GET') {
+    const homeP = loadHome(env);
     const [items, people, events, trips, documents, habits, habitLogs, eventPrefs, gifts, personDates, meds, medLogs, homeTasks, homeLog, meals, mealTitles, settings] = await Promise.all([
       env.DB.prepare("SELECT * FROM items WHERE (user_id = ? OR shared = 1) AND (status = 'open' OR done_at > datetime('now', '-1 day')) ORDER BY due_at IS NULL, due_at").bind(uid).all(),
       env.DB.prepare('SELECT * FROM people WHERE user_id = ? ORDER BY name COLLATE NOCASE').bind(uid).all(),
@@ -378,8 +379,8 @@ async function handleApi(req, env, url, ctx, uid) {
       env.DB.prepare('SELECT d.* FROM person_dates d JOIN people p ON p.id = d.person_id WHERE p.user_id = ?').bind(uid).all(),
       env.DB.prepare('SELECT * FROM meds WHERE user_id = ? AND active = 1 ORDER BY id').bind(uid).all(),
       env.DB.prepare("SELECT l.* FROM med_logs l JOIN meds m ON m.id = l.med_id WHERE m.user_id = ? AND l.date >= date('now', '-35 days')").bind(uid).all(),
-      env.DB.prepare('SELECT * FROM home_tasks WHERE hidden = 0').all(),
-      env.DB.prepare('SELECT * FROM home_log ORDER BY date DESC').all(),
+      homeP.then((h) => ({ results: h.tasks })),
+      homeP.then((h) => ({ results: h.logs })),
       env.DB.prepare("SELECT * FROM meals WHERE date >= date('now', '-8 days') AND date <= date('now', '+30 days')").all(),
       env.DB.prepare("SELECT title, link, COUNT(*) AS n, MAX(date) AS last FROM meals WHERE kind = 'cook' AND title IS NOT NULL GROUP BY lower(title) ORDER BY last DESC LIMIT 40").all(),
       getSettings(env, uid),
@@ -596,26 +597,27 @@ async function handleApi(req, env, url, ctx, uid) {
     if (creating && !out.name) throw new Error('name required');
     return out;
   };
+  // Home tasks are stored as tasks (kind 'home'); these routes keep the Home screens' shape.
   if (path === '/api/home/tasks' && method === 'POST') {
-    try { return json(await insertRow(env, 'home_tasks', { freq: 'Annual', months: '*', ...homeFields(body || {}, true) }), 201); } catch (e) { return json({ error: e.message }, 400); }
+    try { return json(await saveHomeTask(env, null, { freq: 'Annual', months: '*', ...homeFields(body || {}, true) }, uid), 201); } catch (e) { return json({ error: e.message }, 400); }
   }
-  if ((m = /^\/api\/home\/tasks\/(\d+)$/.exec(path)) && method === 'PATCH') return json(await updateRow(env, 'home_tasks', +m[1], homeFields(body || {})));
+  if ((m = /^\/api\/home\/tasks\/(\d+)/.exec(path)) && !(await env.DB.prepare("SELECT 1 FROM tasks WHERE id = ? AND kind = 'home'").bind(+m[1]).first())) return notYours();
+  if ((m = /^\/api\/home\/tasks\/(\d+)$/.exec(path)) && method === 'PATCH') return json(await saveHomeTask(env, +m[1], homeFields(body || {}), uid));
   if ((m = /^\/api\/home\/tasks\/(\d+)\/log$/.exec(path)) && method === 'POST') {
     const date = /^\d{4}-\d{2}-\d{2}$/.test(body && body.date) ? body.date : localParts(new Date(), env.TZ || 'America/Chicago').date;
-    await env.DB.batch([
-      env.DB.prepare('INSERT INTO home_log (task_id, date, skipped) VALUES (?, ?, ?) ON CONFLICT(task_id, date) DO UPDATE SET skipped = excluded.skipped').bind(+m[1], date, body && body.skipped ? 1 : 0),
-      env.DB.prepare('UPDATE home_tasks SET snooze_until = NULL WHERE id = ?').bind(+m[1]),
-    ]);
+    await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, at, by_user) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(task_id, occ) DO UPDATE SET status = excluded.status, at = excluded.at, by_user = excluded.by_user`).bind(+m[1], date, body && body.skipped ? 'skipped' : 'done', nowIso(), uid).run();
+    await saveHomeTask(env, +m[1], { snooze_until: null }, uid);
     return json({ ok: true });
   }
   if ((m = /^\/api\/home\/tasks\/(\d+)\/log$/.exec(path)) && method === 'DELETE') {
     const date = url.searchParams.get('date') || '';
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json({ error: 'date required' }, 400);
-    await env.DB.prepare('DELETE FROM home_log WHERE task_id = ? AND date = ?').bind(+m[1], date).run();
+    await env.DB.prepare('DELETE FROM task_log WHERE task_id = ? AND occ = ?').bind(+m[1], date).run();
     return json({ ok: true });
   }
   if ((m = /^\/api\/home\/log\/(\d+)$/.exec(path)) && method === 'DELETE') {
-    await env.DB.prepare('DELETE FROM home_log WHERE id = ?').bind(+m[1]).run();
+    await env.DB.prepare("DELETE FROM task_log WHERE id = ? AND task_id IN (SELECT id FROM tasks WHERE kind = 'home')").bind(+m[1]).run();
     return json({ ok: true });
   }
 
@@ -849,7 +851,7 @@ async function handleApi(req, env, url, ctx, uid) {
       },
       shared: {
         trips: await all('SELECT * FROM trips'), meals: await all('SELECT * FROM meals'),
-        home_tasks: await all('SELECT * FROM home_tasks'), home_log: await all('SELECT * FROM home_log'),
+        home: 'Home tasks and their history are in yours.tasks / yours.task_log (kind "home")',
       },
     };
     delete out.yours.settings.weather_cache;
@@ -1256,13 +1258,52 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
   return report;
 }
 
+// ---------- Home tasks, stored as tasks ----------
+// The Home screens and due rules (public/home.js) use the old home_tasks / home_log shape.
+async function loadHome(env) {
+  const { results } = await env.DB.prepare("SELECT * FROM tasks WHERE kind = 'home' AND archived = 0").all();
+  const tasks = results.map((r) => {
+    const d = r.details ? JSON.parse(r.details) : {};
+    return { id: r.id, lib_key: d.lib_key || null, name: r.title, room: d.room || null, type: d.type || null, freq: d.freq || 'Annual', months: d.months || '*',
+      who: d.who || null, est: d.est || null, first_due: d.first_due || null, notes: d.notes || null, snooze_until: d.snooze || null, hidden: r.archived,
+      remind: r.nag ? r.nag_mode : 'none', remind_time: r.nag_time, remind_dow: r.nag_dow, remind_dom: d.remind_dom ?? null, remind_to: r.remind_to ?? 0 };
+  });
+  const { results: logs } = await env.DB.prepare(`SELECT l.id, l.task_id, l.occ AS date, CASE WHEN l.status = 'skipped' THEN 1 ELSE 0 END AS skipped
+    FROM task_log l JOIN tasks t ON t.id = l.task_id WHERE t.kind = 'home' ORDER BY l.occ DESC`).all();
+  const last = {};
+  for (const l of logs) if (!last[l.task_id]) last[l.task_id] = l.date;
+  return { tasks, logs, last };
+}
+const HOME_REPEAT = { Weekly: 'weekly', Monthly: 'monthly', Quarterly: 'quarterly', 'Semi-annual': 'semiannual', 'One-time': 'never' };
+async function saveHomeTask(env, id, f, uid) {
+  const cur = id ? await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id).first() : null;
+  const d = { ...(cur && cur.details ? JSON.parse(cur.details) : {}) };
+  for (const [k, col] of [['room', 'room'], ['type', 'type'], ['who', 'who'], ['est', 'est'], ['notes', 'notes'], ['freq', 'freq'], ['months', 'months'],
+    ['first_due', 'first_due'], ['snooze_until', 'snooze'], ['remind_dom', 'remind_dom']]) if (k in f) d[col] = f[k];
+  const row = { details: JSON.stringify(d) };
+  if ('name' in f) row.title = f.name;
+  if ('hidden' in f) row.archived = f.hidden;
+  if ('freq' in f) row.repeat = HOME_REPEAT[f.freq] || 'yearly';
+  if ('first_due' in f) row.date = f.first_due;
+  if ('remind' in f) { row.nag = f.remind === 'none' ? 0 : 1; if (f.remind !== 'none') row.nag_mode = f.remind; }
+  if ('remind_time' in f) row.nag_time = f.remind_time;
+  if ('remind_dow' in f) row.nag_dow = f.remind_dow;
+  if ('remind_to' in f) row.remind_to = f.remind_to;
+  if (!id) {
+    const created = await insertRow(env, 'tasks', { user_id: uid, shared: 1, kind: 'home', title: row.title || 'Home task', repeat: row.repeat || 'yearly', created_at: nowIso(), ...row });
+    return (await loadHome(env)).tasks.find((t) => t.id === created.id);
+  }
+  await updateRow(env, 'tasks', id, row);
+  return (await loadHome(env)).tasks.find((t) => t.id === id) || { ok: true };
+}
+
 // ---------- Tasks ----------
 const TASK_REPEATS = ['never', 'daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'yearly', 'custom'];
 function taskFields(b) {
   const out = {};
   const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '') ? v : null);
   if ('title' in b) out.title = String(b.title || '').trim().slice(0, 120);
-  if ('kind' in b) out.kind = ['task', 'habit', 'med'].includes(b.kind) ? b.kind : 'task';
+  if ('kind' in b) out.kind = ['task', 'habit', 'med', 'home'].includes(b.kind) ? b.kind : 'task';
   if ('details' in b) out.details = b.details && typeof b.details === 'object' ? JSON.stringify(b.details).slice(0, 4000) : null;
   if ('date' in b) out.date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : null;
   if ('time' in b) out.time = hhmm(b.time);
@@ -1276,7 +1317,7 @@ function taskFields(b) {
       dose_times: c.dose_times && typeof c.dose_times === 'object' ? Object.fromEntries(Object.entries(c.dose_times).filter(([k, v]) => /^\d{1,2}$/.test(k) && hhmm(v))) : null }) : null;
   }
   if ('nag' in b) out.nag = b.nag ? 1 : 0;
-  if ('nag_mode' in b) out.nag_mode = ['hourly', 'daily', 'weekly'].includes(b.nag_mode) ? b.nag_mode : 'hourly';
+  if ('nag_mode' in b) out.nag_mode = ['hourly', 'daily', 'weekly', 'monthly'].includes(b.nag_mode) ? b.nag_mode : 'hourly';
   if ('nag_time' in b) out.nag_time = hhmm(b.nag_time);
   if ('nag_dow' in b) out.nag_dow = b.nag_dow === null || b.nag_dow === '' ? null : Math.min(6, Math.max(0, Math.round(+b.nag_dow) || 0));
   if ('remind_to' in b) out.remind_to = b.remind_to === null || b.remind_to === '' ? null : Math.max(0, Math.round(+b.remind_to) || 0);
@@ -1295,7 +1336,7 @@ async function loadTasks(env, uid) {
 // Nag until done: hourly, daily at a time, or weekly on a day. Only for today's occurrences
 // (and a one-off task whose date has passed); snoozes and quiet hours are respected.
 async function sendTaskReminders(env, tz, local, quiet, now, uid) {
-  const { results } = await env.DB.prepare(`SELECT * FROM tasks WHERE archived = 0 AND nag = 1
+  const { results } = await env.DB.prepare(`SELECT * FROM tasks WHERE archived = 0 AND nag = 1 AND kind != 'home'
     AND ((remind_to IS NULL AND user_id = ?) OR remind_to = ? OR (remind_to = 0 AND (user_id = ? OR shared = 1)))`).bind(uid, uid, uid).all();
   if (!results.length) return [];
   const tasks = results.map(taskOut);
@@ -1492,10 +1533,10 @@ async function sendMedReminders(env, tz, local, quiet, now, uid = 1) {
 //   hourly: from its due day on, every hour outside quiet hours
 //   daily / weekly / monthly: once at the time you picked (on the weekday / date you picked)
 async function sendHomeReminders(env, tz, local, quiet, now, uid) {
-  const { results: tasks } = await env.DB.prepare("SELECT * FROM home_tasks WHERE hidden = 0 AND remind != 'none' AND (remind_to = ? OR remind_to = 0)").bind(uid).all();
+  const home = await loadHome(env);
+  const tasks = home.tasks.filter((t) => t.remind !== 'none' && (t.remind_to === uid || t.remind_to === 0));
   if (!tasks.length) return [];
-  const { results: logs } = await env.DB.prepare('SELECT task_id, MAX(date) AS last FROM home_log GROUP BY task_id').all();
-  const last = Object.fromEntries(logs.map((r) => [r.task_id, r.last]));
+  const last = home.last;
   const window = daysToMonthEnd(local.date);
   const minutesNow = local.h * 60 + local.min;
   const sent = [];
@@ -1588,11 +1629,8 @@ async function unplannedNights(env, local) {
 
 // "Home: 1 overdue · 3 this week" for the morning briefing
 async function homeSummary(env, date) {
-  const [tasks, logs] = await Promise.all([
-    env.DB.prepare('SELECT * FROM home_tasks WHERE hidden = 0').all(),
-    env.DB.prepare('SELECT task_id, MAX(date) AS last FROM home_log GROUP BY task_id').all(),
-  ]);
-  const last = Object.fromEntries(logs.results.map((r) => [r.task_id, r.last]));
+  const home = await loadHome(env);
+  const tasks = { results: home.tasks }, last = home.last;
   let over = 0, week = 0;
   for (const t of tasks.results) { const d = homeDue(t, last[t.id] || null, date); if (d.completed) continue; if (d.k < 0) over++; else if (d.k <= 6) week++; }
   if (!over && !week) return null;

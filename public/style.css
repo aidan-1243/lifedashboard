@@ -1060,3 +1060,4 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 .tk-all .tk-row { font-size: 15px; }
 .habit .hstreak { font-variant-numeric: tabular-nums; }
 .tk-dose { font-size: 15px; font-weight: 600; color: var(--muted); }
+.tk-hint { padding: 4px 14px 10px; margin: 0; } .k-home { background: var(--a-home-bg); color: var(--a-home); }

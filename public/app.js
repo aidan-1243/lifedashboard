@@ -1124,82 +1124,96 @@ import * as TK from './tasks.js';
     return txt + who;
   }
 
+  // Home streak: consecutive "Done" entries, newest first, until a skip.
+  function homeStreak(id) {
+    const logs = (data.home_log || []).filter((l) => l.task_id === id).sort((a, z) => z.date.localeCompare(a.date));
+    let current = 0, run = 0, best = 0, still = true;
+    for (const l of logs) { if (l.skipped) { still = false; best = Math.max(best, run); run = 0; } else { run++; if (still) current++; } }
+    return { current, best: Math.max(best, run) };
+  }
+
+  // Home task pop-up, in the shared task layout (header + streak, main action, details,
+  // schedule, reminders, history). Home keeps its own due rules (public/home.js).
   function openHomeTask(t) {
     const isNew = !t.id;
     const i = isNew ? null : homeInfo(t);
-    const hist = isNew ? [] : (data.home_log || []).filter((l) => l.task_id === t.id);
+    const hist = isNew ? [] : (data.home_log || []).filter((l) => l.task_id === t.id).sort((a, z) => z.date.localeCompare(a.date));
     const last = isNew ? null : homeLast(t.id);
+    const st = isNew ? { current: 0, best: 0 } : homeStreak(t.id);
     const startMonth = t.months && t.months !== '*' && !/-/.test(t.months) ? Math.min(...t.months.split(',').map(Number)) : new Date().getMonth() + 1;
-    const opt = (list, sel) => list.map((x) => `<option${x === sel ? ' selected' : ''}>${esc(x)}</option>`).join('');
     const rooms = [...new Set((data.home_tasks || []).map((x) => x.room).filter(Boolean))].sort();
+    const users = data.users || [];
+    const opt = (list, sel) => list.map(([v, l]) => `<option value="${esc(v)}"${String(sel) === String(v) ? ' selected' : ''}>${esc(l)}</option>`).join('');
     const statusText = isNew ? '' : i.completed ? 'Completed' : i.k < 0 ? `${-i.k} day${i.k === -1 ? '' : 's'} overdue` : i.k === 0 ? 'Due today' : i.k === 1 ? 'Due tomorrow' : `Due ${fmtYmd(i.due, { weekday: i.k <= 6 ? 'long' : undefined, month: 'short', day: 'numeric' })}`;
-    const fact = (label, value) => value ? `<div class="hfact"><span>${label}</span><strong>${esc(value)}</strong></div>` : '';
-    const view = isNew ? '' : `<div class="hview">
-        <div class="hhead"><span class="ricon">${roomIcon(t.room)}</span><h3>${esc(t.name)}</h3></div>
-        <div class="hstatus"><span class="pill-status ${i.cls}">${esc(statusText)}${i.snoozed ? ' · snoozed' : ''}</span>${last ? `<span class="muted-t">Last done ${esc(fmtYmd(last))}</span>` : '<span class="muted-t">Not done yet</span>'}</div>
-        <div class="hfacts">${fact('Room', t.room)}${fact('How often', t.freq)}${fact('Who', t.who)}${fact('Takes', t.est)}${fact('Reminder', homeRemindText(t))}</div>
-        ${t.notes ? `<p class="hnotes">${esc(t.notes)}</p>` : ''}
-        <button type="button" class="btn accent hdone" data-h="done">Mark done today</button>
-        <div class="btns2 hsecond"><button type="button" class="btn ghost" data-h="snooze">Snooze a week</button><button type="button" class="btn ghost" data-h="skip">Skip this time</button></div>
-        <div class="hmore">
-          <button type="button" class="link" data-h="other">Done on another day…</button>
-          <div class="addrow" data-hpanel="other" hidden><input type="date" id="h-date" max="${todayYmd()}" aria-label="Date completed"><button type="button" class="pbtn" data-h="date">Log it</button></div>
-          ${hist.length ? `<button type="button" class="link" data-h="hist">History (${hist.length})</button>
-          <div class="card" data-hpanel="hist" hidden>${hist.slice(0, 12).map((l) => `<div class="hist-row"><span>${esc(fmtYmd(l.date, { month: 'short', day: 'numeric', year: 'numeric' }))}${l.skipped ? ' · skipped' : ''}</span><button type="button" class="pbtn icon" data-h="unlog" data-id="${l.id}" aria-label="Remove this entry">×</button></div>`).join('')}</div>` : ''}
-          <button type="button" class="link" data-h="edit">Edit task</button>
-        </div>
-      </div>`;
-    sheet.innerHTML = `<form method="dialog" class="home-sheet${isNew ? ' editing' : ''}">
-      ${view}
-      <div class="hedit">
-        <h3>${isNew ? 'New home task' : 'Edit task'}</h3>
-        <label class="field"><span>Task</span><input name="name" value="${esc(t.name || '')}" required maxlength="120"></label>
-        <div class="two"><label class="field"><span>Room / area</span><input name="room" value="${esc(t.room || '')}" list="room-list" maxlength="60"></label>
-          <label class="field"><span>Who</span><input name="who" value="${esc(t.who || '')}" placeholder="DIY / Pro" maxlength="40"></label></div>
-        <datalist id="room-list">${rooms.map((r) => `<option value="${esc(r)}">`).join('')}</datalist>
-        <div class="two"><label class="field"><span>Type</span><select name="type">${opt(HOME_TYPES, t.type || 'Maintenance')}</select></label>
-          <label class="field"><span>How often</span><select name="freq">${opt(HOME_FREQS, t.freq || 'Annual')}</select></label></div>
-        <div class="two"><label class="field" data-hf="start"><span>Starting month</span><select name="start">${Array.from({ length: 12 }, (_, k) => `<option value="${k + 1}"${startMonth === k + 1 ? ' selected' : ''}>${new Date(2000, k, 1).toLocaleDateString([], { month: 'long' })}</option>`).join('')}</select></label>
-          <label class="field" data-hf="date"><span>Due date</span><input type="date" name="due" value="${esc(/-/.test(t.months || '') ? t.months : '')}"></label>
-          <label class="field"><span>Takes</span><input name="est" value="${esc(t.est || '')}" placeholder="30 min" maxlength="40"></label></div>
-        <label class="field"><span>Notes</span><textarea name="notes">${esc(t.notes || '')}</textarea></label>
-        <div class="field"><span>Remind me</span>
-          <select name="remind">${[['none', 'Off'], ['hourly', 'Hourly (from the due day until done)'], ['daily', 'Daily'], ['weekly', 'Weekly'], ['monthly', 'Monthly']].map(([k, v]) => `<option value="${k}"${(t.remind || 'none') === k ? ' selected' : ''}>${v}</option>`).join('')}</select>
-          <div class="two" data-hr="when">
-            <label class="field" data-hr="dow"><span>Day</span><select name="remind_dow">${WEEKDAY_NAMES.map((d, k) => `<option value="${k}"${(t.remind_dow ?? 1) === k ? ' selected' : ''}>${d}</option>`).join('')}</select></label>
-            <label class="field" data-hr="dom"><span>Date</span><select name="remind_dom">${Array.from({ length: 31 }, (_, k) => `<option value="${k + 1}"${(t.remind_dom || 1) === k + 1 ? ' selected' : ''}>${ORDINAL(k + 1)}</option>`).join('')}</select></label>
-            <label class="field" data-hr="time"><span>Time</span><input type="time" name="remind_time" value="${esc(t.remind_time || '09:00')}"></label>
-          </div>
-          ${(data.users || []).length > 1 ? `<label class="field" data-hr="to"><span>Remind</span><select name="remind_to">${[[data.me.id, 'Me'], ...others().map((u) => [u.id, u.name]), [0, 'Both of us']].map(([id, n]) => `<option value="${id}"${(t.remind && t.remind !== 'none' ? t.remind_to ?? 0 : data.me.id) === id ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></label>` : ''}
-          <p class="hint" data-hr="note">Reminders only run while the task is on your To do list (due this month or overdue), and stop once it's done.</p>
-        </div>
-        <div class="actions">${isNew ? '' : '<button type="button" class="btn danger" data-h="hide">Remove</button>'}<span class="grow"></span>
-          <button type="button" class="btn ghost" data-h="${isNew ? 'cancel' : 'back'}">${isNew ? 'Cancel' : 'Back'}</button><button type="submit" class="btn dark">Save</button></div>
+    const remind = t.remind || 'none';
+    sheet.innerHTML = `<form method="dialog" class="tk-sheet">
+      <div class="tk-head"><span class="tk-icon"><span class="evmark k-home">${roomIcon(t.room)}</span></span>
+        <div class="tk-title"><h3>${isNew ? 'New home task' : esc(t.name)}</h3>${isNew ? '' : `<p class="sub">${esc(statusText)}${i.snoozed ? ' · snoozed' : ''}</p>`}</div>
+        ${isNew ? '' : flame(st.current)}</div>
+      ${isNew || i.completed ? '' : `<div class="tk-main">
+        <button type="button" class="btn dark big" data-h="done">Done</button>
+        <div class="btns2"><button type="button" class="btn ghost" data-h="skip">Skip this time</button><button type="button" class="btn ghost" data-h="snooze">Snooze a week</button></div>
+      </div>`}
+      <div class="lbl">Details</div>
+      <div class="tk-group">
+        <label class="tk-row tk-in"><span>Name</span><input name="name" value="${esc(t.name || '')}" required maxlength="120" placeholder="Change furnace filter"></label>
+        <label class="tk-row tk-in"><span>Room</span><input name="room" value="${esc(t.room || '')}" list="room-list" maxlength="60" placeholder="Whole Home"></label>
+        <label class="tk-row tk-in"><span>Who</span><input name="who" value="${esc(t.who || '')}" maxlength="40" placeholder="DIY / Pro"></label>
+        <label class="tk-row tk-in"><span>Takes</span><input name="est" value="${esc(t.est || '')}" maxlength="40" placeholder="30 min"></label>
+        <label class="tk-row"><span>Type</span><select name="type">${opt(HOME_TYPES.map((x) => [x, x]), t.type || 'Maintenance')}</select></label>
+        <label class="tk-row tk-in"><span>Notes</span><input name="notes" value="${esc(t.notes || '')}" maxlength="1000" placeholder="Optional"></label>
       </div>
+      <datalist id="room-list">${rooms.map((r) => `<option value="${esc(r)}">`).join('')}</datalist>
+      <div class="lbl">Schedule</div>
+      <div class="tk-group">
+        <label class="tk-row"><span>${kindMark('repeat')} Repeat</span><select name="freq">${opt(HOME_FREQS.map((x) => [x, x]), t.freq || 'Annual')}</select></label>
+        <label class="tk-row tk-sub" data-hf="start"><span>Starting</span><select name="start">${opt(Array.from({ length: 12 }, (_, k) => [k + 1, new Date(2000, k, 1).toLocaleDateString([], { month: 'long' })]), startMonth)}</select></label>
+        <label class="tk-row tk-sub" data-hf="date"><span>${kindMark('calendar')} Due</span><input type="date" name="due" value="${esc(/-/.test(t.months || '') ? t.months : '')}"></label>
+      </div>
+      <div class="lbl">Reminders</div>
+      <div class="tk-group">
+        <label class="tk-row"><span>Nag until done</span><input type="checkbox" class="tk-switch" name="nag"${remind !== 'none' ? ' checked' : ''}></label>
+        <label class="tk-row tk-sub" data-hr="on"><span>How often</span><select name="remind">${opt([['hourly', 'Hourly (once due)'], ['daily', 'Daily'], ['weekly', 'Weekly'], ['monthly', 'Monthly']], remind === 'none' ? 'daily' : remind)}</select></label>
+        <label class="tk-row tk-sub" data-hr="dow"><span>On</span><select name="remind_dow">${opt(WEEKDAY_NAMES.map((d, k) => [k, d]), t.remind_dow ?? 1)}</select></label>
+        <label class="tk-row tk-sub" data-hr="dom"><span>On the</span><select name="remind_dom">${opt(Array.from({ length: 31 }, (_, k) => [k + 1, ORDINAL(k + 1)]), t.remind_dom || 1)}</select></label>
+        <label class="tk-row tk-sub" data-hr="time"><span>At</span><input type="time" name="remind_time" value="${esc(t.remind_time || '09:00')}"></label>
+        ${users.length > 1 ? `<label class="tk-row" data-hr="on"><span>For</span><select name="remind_to">${opt([[data.me.id, 'Me'], ...others().map((u) => [u.id, u.name]), [0, 'Both of us']], remind !== 'none' ? (t.remind_to ?? 0) : data.me.id)}</select></label>` : ''}
+        <p class="hint tk-hint" data-hr="on">Only while it's on the To do list (due this month or overdue); stops once it's done.</p>
+      </div>
+      ${isNew ? '' : `<div class="lbl">History</div>
+      <div class="tk-group">
+        <div class="tk-strip" role="img" aria-label="Last ${Math.min(12, hist.length)} times">${hist.slice(0, 12).reverse().map((l) => `<i class="${l.skipped ? 'skipped' : 'done'}" title="${esc(fmtYmd(l.date))}${l.skipped ? ' skipped' : ''}"></i>`).join('') || '<i class="open"></i>'}</div>
+        <div class="tk-row"><span class="meta">${last ? `Last done ${esc(fmtYmd(last))}` : 'Not done yet'} · best ${st.best}</span><button type="button" class="link" data-h="hist">All ›</button></div>
+        <div class="tk-all" data-hpanel="hist" hidden>
+          ${hist.slice(0, 40).map((l) => `<div class="tk-row"><span>${esc(fmtYmd(l.date, { month: 'short', day: 'numeric', year: 'numeric' }))}${l.skipped ? ' · skipped' : ''}</span><button type="button" class="pbtn icon" data-h="unlog" data-id="${l.id}" aria-label="Remove this entry">×</button></div>`).join('')}
+          <div class="tk-row"><input type="date" id="h-date" max="${todayYmd()}" aria-label="Date completed"><button type="button" class="pbtn" data-h="date">Done on this day</button></div>
+        </div>
+      </div>`}
+      <div class="actions">${isNew ? '' : '<button type="button" class="btn danger" data-h="hide">Remove</button>'}<span class="grow"></span>
+        <button type="button" class="btn ghost" data-sheet="close">${isNew ? 'Cancel' : 'Close'}</button><button type="submit" class="btn dark">Save</button></div>
     </form>`;
     const form = sheet.querySelector('form');
-    const showFor = () => { const f = form.freq.value;
+    const showFor = () => {
+      const f = form.freq.value;
       form.querySelector('[data-hf="start"]').hidden = ['Weekly', 'Monthly', 'One-time'].includes(f);
-      form.querySelector('[data-hf="date"]').hidden = f !== 'One-time'; };
-    form.freq.onchange = showFor; showFor();
-    const showRemind = () => { const r = form.remind.value;
-      form.querySelector('[data-hr="when"]').hidden = r === 'none' || r === 'hourly';
-      form.querySelector('[data-hr="dow"]').hidden = r !== 'weekly';
-      form.querySelector('[data-hr="dom"]').hidden = r !== 'monthly';
-      form.querySelectorAll('[data-hr="to"], [data-hr="note"]').forEach((el) => { el.hidden = r === 'none'; }); };
-    form.remind.onchange = showRemind; showRemind();
+      form.querySelector('[data-hf="date"]').hidden = f !== 'One-time';
+      const on = form.nag.checked, r = form.remind.value;
+      form.querySelectorAll('[data-hr="on"]').forEach((el) => { el.hidden = !on; });
+      form.querySelector('[data-hr="dow"]').hidden = !on || r !== 'weekly';
+      form.querySelector('[data-hr="dom"]').hidden = !on || r !== 'monthly';
+      form.querySelector('[data-hr="time"]').hidden = !on || r === 'hourly';
+    };
+    form.addEventListener('change', (e) => { if (['freq', 'nag', 'remind'].includes(e.target.name)) showFor(); });
+    showFor();
     form.querySelectorAll('[data-h]').forEach((b) => { b.onclick = async () => {
       const act = b.dataset.h;
       try {
         if (act === 'done') { b.classList.add('completing'); await new Promise((r) => setTimeout(r, 200)); sheet.close(); await homeLog(t.id, todayYmd()); }
         else if (act === 'skip') { sheet.close(); await homeLog(t.id, todayYmd(), true); }
         else if (act === 'snooze') { sheet.close(); await homeSnooze(t.id, 7); }
-        else if (act === 'other' || act === 'hist') { const panel = form.querySelector(`[data-hpanel="${act}"]`); panel.hidden = !panel.hidden; }
+        else if (act === 'hist') { const panel = form.querySelector('[data-hpanel="hist"]'); panel.hidden = !panel.hidden; }
         else if (act === 'date') { const d = form.querySelector('#h-date').value; if (!d) { toast('Pick a date'); return; } await homeLog(t.id, d); openHomeTask(data.home_tasks.find((x) => x.id === t.id)); }
         else if (act === 'unlog') { await api(`/api/home/log/${b.dataset.id}`, { method: 'DELETE' }); await refresh(); openHomeTask(data.home_tasks.find((x) => x.id === t.id)); form.querySelector('[data-hpanel="hist"]')?.removeAttribute('hidden'); }
-        else if (act === 'edit') { form.classList.add('editing'); sheet.scrollTop = 0; }
-        else if (act === 'back') { if (!sheetDirty() || confirm('Discard your changes?')) { form.classList.remove('editing'); sheet.dataset.dirty = ''; } }
-        else if (act === 'cancel') { if (okToClose()) sheet.close(); }
         else if (act === 'hide') { if (!confirm(`Remove "${t.name}"? Its history is kept.`)) return; await api(`/api/home/tasks/${t.id}`, { method: 'PATCH', body: { hidden: 1 } }); sheet.close(); await refresh(); toast('Removed'); }
       } catch (err) { toast(err.message); }
     }; });
@@ -1209,8 +1223,9 @@ import * as TK from './tasks.js';
       const freq = f.get('freq');
       const body = { name: f.get('name').trim(), room: f.get('room').trim() || 'Whole Home', who: f.get('who').trim(), type: f.get('type'), freq,
         months: freq === 'One-time' ? (f.get('due') || todayYmd()) : monthsFor(freq, +f.get('start')), est: f.get('est').trim(), notes: f.get('notes').trim(),
-        remind: f.get('remind'), remind_time: f.get('remind_time') || '09:00', remind_dow: +f.get('remind_dow'), remind_dom: +f.get('remind_dom'),
+        remind: form.nag.checked ? f.get('remind') : 'none', remind_time: f.get('remind_time') || '09:00', remind_dow: +f.get('remind_dow'), remind_dom: +f.get('remind_dom'),
         remind_to: f.has('remind_to') ? +f.get('remind_to') : (data.me ? data.me.id : 0) };
+      if (!body.name) { toast('Give it a name'); return; }
       try {
         if (isNew) await api('/api/home/tasks', { body }); else await api(`/api/home/tasks/${t.id}`, { method: 'PATCH', body });
         sheet.close(); await refresh(); toast('Saved');
