@@ -922,20 +922,53 @@ import * as TK from './tasks.js';
     `;
   }
 
+  // Dinner planning streak: nights in a row (ending yesterday, or tonight once planned) with a plan
+  function mealStreak() {
+    const planned = new Set((data.tasks || []).filter((t) => t.kind === 'meal' && !t.archived).map((t) => t.date));
+    let d = todayYmd(), current = 0;
+    if (!planned.has(d)) d = TK.addDays(d, -1);
+    while (planned.has(d)) { current++; d = TK.addDays(d, -1); }
+    return current;
+  }
+
+  // Dinner pop-up, in the shared task layout
   function openMeal(date) {
     const ml = mealFor(date) || { kind: 'cook' };
     const d = parseDay(date);
     const plans = eveningPlans(date);
     const recent = (data.meal_titles || []).slice(0, 10);
-    sheet.innerHTML = `<form method="dialog">
-      <h3>${esc(d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }))}</h3>
+    const isPast = date <= todayYmd();
+    const canEat = ml.date && isPast && ml.kind !== 'skip';
+    // History: the last 14 nights up to this one (planned to cook / out or leftovers / skipped / no plan)
+    const nights = Array.from({ length: 14 }, (_, i) => TK.addDays(date > todayYmd() ? todayYmd() : date, i - 13));
+    const strip = nights.map((n) => { const m = mealFor(n) || (data.tasks || []).filter((t) => t.kind === 'meal' && t.date === n).map((t) => ({ kind: (t.details || {}).mkind }))[0];
+      return { n, status: !m ? 'missed' : m.kind === 'cook' ? 'done' : m.kind === 'skip' ? 'skipped' : 'partial' }; });
+    const same = ml.title ? (data.tasks || []).filter((t) => t.kind === 'meal' && (t.details || {}).name && t.details.name.toLowerCase() === ml.title.toLowerCase() && t.date <= todayYmd()).map((t) => t.date).sort() : [];
+    const kindTxt = { cook: 'Cooking', out: 'Eating out', leftovers: 'Leftovers', skip: 'No dinner needed' };
+    sheet.innerHTML = `<form method="dialog" class="tk-sheet">
+      <div class="tk-head"><span class="tk-icon">${kindMark('fork', 'k-meal')}</span>
+        <div class="tk-title"><h3>${esc(d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }))}</h3>
+        <p class="sub">${ml.date ? `${esc(kindTxt[ml.kind] || '')}${ml.title ? ` · ${esc(ml.title)}` : ''}${ml.eaten ? ' · ate' : ''}` : 'Nothing planned yet'}</p></div>${flame(mealStreak())}</div>
+      ${canEat ? `<div class="tk-main">${ml.eaten ? '<button type="button" class="btn ok big" data-ml="uneat">✓ We ate · Undo</button>' : '<button type="button" class="btn dark big" data-ml="eat">We ate</button>'}</div>` : ''}
       ${plans.length ? `<p class="sub">On your calendar: ${esc(plans.map((p) => `${p.title} at ${fmtTime(p.start_at)}`).join(', '))}</p>` : ''}
-      <div class="filters" role="radiogroup" aria-label="Dinner plan">${Object.entries(MEAL_KINDS).map(([k, v]) => `<button type="button" data-kind="${k}" aria-pressed="${ml.kind === k}">${v}</button>`).join('')}</div>
-      <label class="field" data-mk="title"><span data-mk-label>What's for dinner?</span><input name="title" value="${esc(ml.title || '')}" list="meal-list" maxlength="120" placeholder="Tacos"></label>
+      <div class="lbl">Details</div>
+      <div class="tk-group">
+        <div class="tk-row tk-kinds"><div class="filters" role="radiogroup" aria-label="Dinner plan">${Object.entries(MEAL_KINDS).map(([k, v]) => `<button type="button" data-kind="${k}" aria-pressed="${ml.kind === k}">${v}</button>`).join('')}</div></div>
+        <label class="tk-row tk-in" data-mk="title"><span data-mk-label>Meal</span><input name="title" value="${esc(ml.title || '')}" list="meal-list" maxlength="120" placeholder="Tacos"></label>
+        ${recent.length ? `<div class="tk-row" data-mk="recent"><div class="chips-scroll filters" aria-label="Recent meals">${recent.map((r, i) => `<button type="button" data-recent="${i}">${esc(r.title)}</button>`).join('')}</div></div>` : ''}
+        <label class="tk-row tk-in" data-mk="link"><span>Recipe</span><input name="link" type="url" value="${esc(ml.link || '')}" placeholder="https://"></label>
+        <label class="tk-row tk-in"><span>Notes</span><input name="notes" value="${esc(ml.notes || '')}" maxlength="500" placeholder="thaw chicken in the morning"></label>
+      </div>
       <datalist id="meal-list">${recent.map((r) => `<option value="${esc(r.title)}">`).join('')}</datalist>
-      ${recent.length ? `<div class="chips-scroll filters" data-mk="recent" aria-label="Recent meals">${recent.map((r, i) => `<button type="button" data-recent="${i}">${esc(r.title)}</button>`).join('')}</div>` : ''}
-      <label class="field" data-mk="link"><span>Recipe link</span><input name="link" type="url" value="${esc(ml.link || '')}" placeholder="https://"></label>
-      <label class="field"><span>Notes</span><input name="notes" value="${esc(ml.notes || '')}" maxlength="500" placeholder="thaw chicken in the morning"></label>
+      <div class="lbl">Schedule</div>
+      <div class="tk-group"><div class="tk-row"><span>${kindMark('calendar')} ${esc(d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' }))}</span><span class="meta">one night</span></div></div>
+      <div class="lbl">Reminders</div>
+      <div class="tk-group"><a class="tk-row tk-link" href="#settings"><span class="meta">Sunday planning nudge: set it in Settings</span><span class="meta">›</span></a></div>
+      <div class="lbl">History</div>
+      <div class="tk-group">
+        <div class="tk-strip" role="img" aria-label="Last 14 nights">${strip.map((x) => `<i class="${x.status}" title="${esc(x.n)}"></i>`).join('')}</div>
+        <div class="tk-row"><span class="meta">${ml.title && same.length ? `Made ${same.length} time${same.length === 1 ? '' : 's'} · last ${esc(fmtYmd(same[same.length - 1]))}` : 'Green: cooking · light: out or leftovers · red: no dinner'}</span></div>
+      </div>
       <div class="actions">${ml.date ? '<button type="button" class="btn danger" data-sheet="clear">Clear</button>' : ''}<span class="grow"></span>
         <button type="button" class="btn ghost" data-sheet="close">Cancel</button><button type="submit" class="btn dark">Save</button></div>
     </form>`;
@@ -944,13 +977,15 @@ import * as TK from './tasks.js';
     const sync = () => {
       form.querySelectorAll('[data-kind]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.kind === kind)));
       form.querySelector('[data-mk="title"]').hidden = kind === 'skip';
-      form.querySelector('[data-mk-label]').textContent = kind === 'out' ? 'Where? (optional)' : kind === 'leftovers' ? 'Leftovers from? (optional)' : "What's for dinner?";
+      form.querySelector('[data-mk-label]').textContent = kind === 'out' ? 'Where' : kind === 'leftovers' ? 'From' : 'Meal';
       form.querySelectorAll('[data-mk="recent"], [data-mk="link"]').forEach((el) => { el.hidden = kind !== 'cook'; });
     };
     sync();
     form.querySelectorAll('[data-kind]').forEach((b) => { b.onclick = () => { kind = b.dataset.kind; sync(); }; });
     form.querySelectorAll('[data-recent]').forEach((b) => { b.onclick = () => { const r = recent[+b.dataset.recent]; form.title.value = r.title; if (r.link && !form.link.value) form.link.value = r.link; }; });
-    form.querySelector('[data-sheet="close"]').onclick = () => sheet.close();
+    form.querySelectorAll('[data-ml]').forEach((b) => { b.onclick = async () => {
+      try { await api(`/api/meals/${date}/eaten`, { body: { eaten: b.dataset.ml === 'eat' ? 1 : 0 } }); sheet.close(); await refresh(); toast(b.dataset.ml === 'eat' ? 'Nice. Off Today for tonight' : 'Undone'); } catch (err) { toast(err.message); }
+    }; });
     const clear = form.querySelector('[data-sheet="clear"]');
     if (clear) clear.onclick = async () => { await api(`/api/meals/${date}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Cleared'); };
     form.onsubmit = async (e) => {

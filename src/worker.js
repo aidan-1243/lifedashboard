@@ -381,8 +381,10 @@ async function handleApi(req, env, url, ctx, uid) {
       env.DB.prepare("SELECT l.* FROM med_logs l JOIN meds m ON m.id = l.med_id WHERE m.user_id = ? AND l.date >= date('now', '-35 days')").bind(uid).all(),
       homeP.then((h) => ({ results: h.tasks })),
       homeP.then((h) => ({ results: h.logs })),
-      env.DB.prepare("SELECT * FROM meals WHERE date >= date('now', '-8 days') AND date <= date('now', '+30 days')").all(),
-      env.DB.prepare("SELECT title, link, COUNT(*) AS n, MAX(date) AS last FROM meals WHERE kind = 'cook' AND title IS NOT NULL GROUP BY lower(title) ORDER BY last DESC LIMIT 40").all(),
+      loadMeals(env, "date('now', '-15 days')", "date('now', '+30 days')").then((results) => ({ results })),
+      env.DB.prepare(`SELECT json_extract(details, '$.name') AS title, json_extract(details, '$.link') AS link, COUNT(*) AS n, MAX(date) AS last FROM tasks
+        WHERE kind = 'meal' AND archived = 0 AND json_extract(details, '$.mkind') = 'cook' AND json_extract(details, '$.name') IS NOT NULL
+        GROUP BY lower(json_extract(details, '$.name')) ORDER BY last DESC LIMIT 40`).all(),
       getSettings(env, uid),
     ]);
     delete settings.weather_cache;
@@ -658,22 +660,27 @@ async function handleApi(req, env, url, ctx, uid) {
     if (method === 'DELETE') { await env.DB.prepare('DELETE FROM trips WHERE id = ?').bind(+m[1]).run(); return json({ ok: true }); }
   }
 
-  // Meals: one dinner plan per day
+  // Meals: one dinner plan per night, stored as a shared task (kind 'meal')
   if ((m = /^\/api\/meals\/(\d{4}-\d{2}-\d{2})$/.exec(path))) {
     if (method === 'PUT') {
       const kind = ['cook', 'out', 'leftovers', 'skip'].includes(body && body.kind) ? body.kind : 'cook';
-      const title = body && body.title ? String(body.title).trim().slice(0, 120) : null;
-      if (kind === 'cook' && !title) return json({ error: 'What are you making?' }, 400);
-      await env.DB.prepare(`INSERT INTO meals (date, title, kind, link, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(date) DO UPDATE SET title = excluded.title, kind = excluded.kind, link = excluded.link, notes = excluded.notes, updated_at = excluded.updated_at`)
-        .bind(m[1], title, kind, body.link ? String(body.link).slice(0, 500) : null, body.notes ? String(body.notes).slice(0, 500) : null, nowIso()).run();
+      const name = body && body.title ? String(body.title).trim().slice(0, 120) : null;
+      if (kind === 'cook' && !name) return json({ error: 'What are you making?' }, 400);
+      const title = kind === 'cook' ? name : kind === 'out' ? `Out${name ? `: ${name}` : ''}` : kind === 'leftovers' ? `Leftovers${name ? `: ${name}` : ''}` : 'No dinner needed';
+      const details = { mkind: kind, name, link: body.link ? String(body.link).slice(0, 500) : null, notes: body.notes ? String(body.notes).slice(0, 500) : null };
+      await env.DB.prepare(`INSERT INTO tasks (user_id, shared, kind, title, details, date, repeat, legacy_ref, created_at) VALUES (?, 1, 'meal', ?, ?, ?, 'never', ?, ?)
+        ON CONFLICT(legacy_ref) DO UPDATE SET title = excluded.title, details = excluded.details, archived = 0`)
+        .bind(uid, title, JSON.stringify(details), m[1], `meal:${m[1]}`, nowIso()).run();
       return json({ ok: true });
     }
-    if (method === 'DELETE') { await env.DB.prepare('DELETE FROM meals WHERE date = ?').bind(m[1]).run(); return json({ ok: true }); }
+    if (method === 'DELETE') { await env.DB.prepare("UPDATE tasks SET archived = 1 WHERE legacy_ref = ?").bind(`meal:${m[1]}`).run(); return json({ ok: true }); }
   }
-  // "We already ate": hides tonight's dinner from Today early
+  // "We already ate": hides tonight's dinner from Today early (and counts in its history)
   if ((m = /^\/api\/meals\/(\d{4}-\d{2}-\d{2})\/eaten$/.exec(path)) && method === 'POST') {
-    await env.DB.prepare('UPDATE meals SET eaten = ? WHERE date = ?').bind(body && body.eaten === 0 ? 0 : 1, m[1]).run();
+    const t = await env.DB.prepare('SELECT id FROM tasks WHERE legacy_ref = ?').bind(`meal:${m[1]}`).first();
+    if (!t) return notYours();
+    if (body && body.eaten === 0) await env.DB.prepare('DELETE FROM task_log WHERE task_id = ? AND occ = ?').bind(t.id, m[1]).run();
+    else await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, at, by_user) VALUES (?, ?, 'done', ?, ?) ON CONFLICT(task_id, occ) DO NOTHING`).bind(t.id, m[1], nowIso(), uid).run();
     return json({ ok: true });
   }
 
@@ -873,7 +880,7 @@ async function handleApi(req, env, url, ctx, uid) {
         settings: await getSettings(env, uid),
       },
       shared: {
-        trips: await all('SELECT * FROM trips'), meals: await all('SELECT * FROM meals'),
+        trips: await all('SELECT * FROM trips'), meals: 'Dinners are in yours.tasks (kind "meal")',
         home: 'Home tasks and their history are in yours.tasks / yours.task_log (kind "home")',
       },
     };
@@ -1284,6 +1291,15 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
   return report;
 }
 
+// ---------- Dinners, stored as tasks ----------
+// The dinner screens use the old meals shape: { date, title, kind, link, notes, eaten }.
+async function loadMeals(env, fromSql, toSql) {
+  const { results } = await env.DB.prepare(`SELECT t.id, t.date, t.details, t.created_at,
+      EXISTS (SELECT 1 FROM task_log l WHERE l.task_id = t.id AND l.occ = t.date AND l.status = 'done') AS eaten
+    FROM tasks t WHERE t.kind = 'meal' AND t.archived = 0 AND t.date >= ${fromSql} AND t.date <= ${toSql} ORDER BY t.date`).all();
+  return results.map((r) => { const d = JSON.parse(r.details || '{}'); return { task_id: r.id, date: r.date, title: d.name || null, kind: d.mkind || 'cook', link: d.link || null, notes: d.notes || null, eaten: r.eaten ? 1 : 0, updated_at: r.created_at }; });
+}
+
 // ---------- Home tasks, stored as tasks ----------
 // The Home screens and due rules (public/home.js) use the old home_tasks / home_log shape.
 async function loadHome(env) {
@@ -1390,7 +1406,7 @@ function taskFields(b) {
   const out = {};
   const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '') ? v : null);
   if ('title' in b) out.title = String(b.title || '').trim().slice(0, 120);
-  if ('kind' in b) out.kind = ['task', 'habit', 'med', 'home', 'birthday', 'pdate', 'catchup', 'credit'].includes(b.kind) ? b.kind : 'task';
+  if ('kind' in b) out.kind = ['task', 'habit', 'med', 'home', 'birthday', 'pdate', 'catchup', 'credit', 'meal'].includes(b.kind) ? b.kind : 'task';
   if ('details' in b) out.details = b.details && typeof b.details === 'object' ? JSON.stringify(b.details).slice(0, 4000) : null;
   if ('date' in b) out.date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : null;
   if ('time' in b) out.time = hhmm(b.time);
@@ -1424,7 +1440,7 @@ async function loadTasks(env, uid) {
 // Nag until done: hourly, daily at a time, or weekly on a day. Only for today's occurrences
 // (and a one-off task whose date has passed); snoozes and quiet hours are respected.
 async function sendTaskReminders(env, tz, local, quiet, now, uid) {
-  const { results } = await env.DB.prepare(`SELECT * FROM tasks WHERE archived = 0 AND nag = 1 AND kind NOT IN ('home', 'credit')
+  const { results } = await env.DB.prepare(`SELECT * FROM tasks WHERE archived = 0 AND nag = 1 AND kind NOT IN ('home', 'credit', 'meal')
     AND ((remind_to IS NULL AND user_id = ?) OR remind_to = ? OR (remind_to = 0 AND (user_id = ? OR shared = 1)))`).bind(uid, uid, uid).all();
   if (!results.length) return [];
   const tasks = results.map(taskOut);
@@ -1710,7 +1726,7 @@ async function unplannedNights(env, local) {
   const days = [];
   const dow = new Date(Date.UTC(local.y, local.m - 1, local.d)).getUTCDay();
   for (let i = 0; i <= 6 - dow; i++) days.push(new Date(Date.UTC(local.y, local.m - 1, local.d + i)).toISOString().slice(0, 10));
-  const { results } = await env.DB.prepare(`SELECT date FROM meals WHERE date IN (${days.map(() => '?').join(',')})`).bind(...days).all();
+  const results = await loadMeals(env, `'${days[0]}'`, `'${days[days.length - 1]}'`);
   return days.length - results.length;
 }
 
@@ -1743,7 +1759,7 @@ async function sendBriefing(env, tz, local, uid = 1) {
     lines.push(`${ev.length} event${ev.length > 1 ? 's' : ''}${timed ? `, first at ${fmtTime(timed.start_at, tz)}` : ''}`);
   } else lines.push('Nothing on the calendar');
   if (dueToday.n) lines.push(`${dueToday.n} task${dueToday.n > 1 ? 's' : ''} due today`);
-  const dinner = await env.DB.prepare('SELECT * FROM meals WHERE date = ?').bind(local.date).first();
+  const dinner = (await loadMeals(env, `'${local.date}'`, `'${local.date}'`))[0] || null;
   if (dinner) lines.push(dinner.kind === 'cook' ? `Dinner: ${dinner.title}` : dinner.kind === 'out' ? `Dinner: out${dinner.title ? ` (${dinner.title})` : ''}` : dinner.kind === 'leftovers' ? 'Dinner: leftovers' : 'No dinner plan needed tonight');
   const homeLine = await homeSummary(env, local.date);
   if (homeLine) lines.push(homeLine);
