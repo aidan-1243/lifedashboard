@@ -3,7 +3,6 @@
 
 import { parseCapture } from '../public/parse.js';
 import { parseVcards, birthdayEventPerson } from '../public/vcard.js';
-import { slotsOn } from '../public/meds.js';
 import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS } from '../public/home.js';
 import { sendWebPush } from './webpush.js';
 import * as RW from '../public/rewards.js';
@@ -175,9 +174,7 @@ async function owns(env, table, id, uid) {
   const sql = {
     items: 'SELECT 1 AS ok FROM items WHERE id = ? AND (user_id = ? OR shared = 1)',
     people: 'SELECT 1 AS ok FROM people WHERE id = ? AND user_id = ?',
-    habits: 'SELECT 1 AS ok FROM habits WHERE id = ? AND user_id = ?',
     tasks: 'SELECT 1 AS ok FROM tasks WHERE id = ? AND (user_id = ? OR shared = 1)',
-    meds: 'SELECT 1 AS ok FROM meds WHERE id = ? AND user_id = ?',
     documents: 'SELECT 1 AS ok FROM documents WHERE id = ? AND user_id = ?',
     gifts: 'SELECT 1 AS ok FROM gifts g JOIN people p ON p.id = g.person_id WHERE g.id = ? AND p.user_id = ?',
     person_dates: 'SELECT 1 AS ok FROM person_dates d JOIN people p ON p.id = d.person_id WHERE d.id = ? AND p.user_id = ?',
@@ -335,13 +332,6 @@ async function snoozeTomorrow(env, id) {
 // ---------- notification action links (Done / Snooze buttons) ----------
 
 async function handleAction(req, env, url, ip) {
-  const mm = /^\/a\/med\/(\d+)\/(\d{4}-\d{2}-\d{2})\/(\d{4})\/(taken|skip)$/.exec(url.pathname);
-  if (mm) {
-    const [, id, date, hhmm, act] = mm;
-    if (url.searchParams.get('sig') !== (await sign(env, `med:${id}:${date}:${hhmm}:${act}`))) { await recordFailure(env, ip); return new Response('Bad link', { status: 403 }); }
-    const r = await logMed(env, +id, date, `${hhmm.slice(0, 2)}:${hhmm.slice(2)}`, act === 'skip' ? 'skipped' : 'taken');
-    return new Response(r.already ? `Already logged at ${r.already}.` : act === 'skip' ? 'Skipped.' : 'Logged as taken.', { headers: { 'content-type': 'text/plain' } });
-  }
   const m = /^\/a\/(\d+)\/(done|snooze|tomorrow)$/.exec(url.pathname);
   if (!m) return new Response('Not found', { status: 404 });
   const [, id, action] = m;
@@ -366,20 +356,16 @@ async function handleApi(req, env, url, ctx, uid) {
 
   if (path === '/api/state' && method === 'GET') {
     const homeP = loadHome(env);
-    const [items, people, events, trips, documents, habits, habitLogs, eventPrefs, gifts, personDates, meds, medLogs, homeTasks, homeLog, meals, mealTitles, settings] = await Promise.all([
+    const [items, people, events, trips, documents, eventPrefs, gifts, personDates, homeTasks, homeLog, meals, mealTitles, settings] = await Promise.all([
       // Open tasks, ones finished in the last day, and every task in a trip (for "6 of 9 booked")
       env.DB.prepare("SELECT * FROM items WHERE (user_id = ? OR shared = 1) AND (status = 'open' OR done_at > datetime('now', '-1 day') OR trip_id IS NOT NULL) ORDER BY due_at IS NULL, due_at").bind(uid).all(),
       env.DB.prepare('SELECT * FROM people WHERE user_id = ? ORDER BY name COLLATE NOCASE').bind(uid).all(),
       visibleEvents(env, uid).then((results) => ({ results })),
       env.DB.prepare("SELECT * FROM trips WHERE COALESCE(end_date, start_date) >= date('now', '-1 day') ORDER BY start_date").all(),
       env.DB.prepare('SELECT * FROM documents WHERE user_id = ? ORDER BY expires_on').bind(uid).all(),
-      env.DB.prepare('SELECT * FROM habits WHERE user_id = ? AND archived = 0 ORDER BY sort, id').bind(uid).all(),
-      env.DB.prepare("SELECT l.habit_id, l.date FROM habit_logs l JOIN habits h ON h.id = l.habit_id WHERE h.user_id = ? AND l.date >= date('now', '-120 days')").bind(uid).all(),
       eventPrefRows(env, uid).then((results) => ({ results })),
       env.DB.prepare("SELECT g.* FROM gifts g JOIN people p ON p.id = g.person_id WHERE p.user_id = ? AND (g.status != 'given' OR g.created_at > date('now', '-400 days')) ORDER BY g.created_at DESC").bind(uid).all(),
       env.DB.prepare('SELECT d.* FROM person_dates d JOIN people p ON p.id = d.person_id WHERE p.user_id = ?').bind(uid).all(),
-      env.DB.prepare('SELECT * FROM meds WHERE user_id = ? AND active = 1 ORDER BY id').bind(uid).all(),
-      env.DB.prepare("SELECT l.* FROM med_logs l JOIN meds m ON m.id = l.med_id WHERE m.user_id = ? AND l.date >= date('now', '-35 days')").bind(uid).all(),
       homeP.then((h) => ({ results: h.tasks })),
       homeP.then((h) => ({ results: h.logs })),
       loadMeals(env, "date('now', '-15 days')", "date('now', '+30 days')").then((results) => ({ results })),
@@ -395,7 +381,7 @@ async function handleApi(req, env, url, ctx, uid) {
     const prefs = Object.fromEntries(eventPrefs.results.map((r) => [r.key, r]));
     const evs = events.results.map((e) => ({ ...e, ...eventKeys(e), pref: eventPref(e, prefs, settings) }));
     return json({ items: items.results, people: people.results, events: evs, event_prefs: eventPrefs.results, trips: trips.results, documents: documents.results,
-      habits: habits.results, habit_logs: habitLogs.results, gifts: gifts.results, person_dates: personDates.results, meds: meds.results, med_logs: medLogs.results, home_tasks: homeTasks.results, home_log: homeLog.results, meals: meals.results, meal_titles: mealTitles.results, settings, tz: env.TZ || 'America/Chicago', auth: env.ACCESS_AUD ? 'access' : 'password',
+      gifts: gifts.results, person_dates: personDates.results, home_tasks: homeTasks.results, home_log: homeLog.results, meals: meals.results, meal_titles: mealTitles.results, settings, tz: env.TZ || 'America/Chicago', auth: env.ACCESS_AUD ? 'access' : 'password',
       me, users: users.map((u) => ({ id: u.id, name: u.name })), rewards: await loadRewards(env), ...(await loadTasks(env, uid)),
       push: { public_key: env.VAPID_PUBLIC || '', devices: (await env.DB.prepare('SELECT device, created_at, last_ok_at, last_error, endpoint FROM push_subs WHERE user_id = ?').bind(uid).all()).results } });
   }
@@ -486,28 +472,6 @@ async function handleApi(req, env, url, ctx, uid) {
   // Weather (US National Weather Service; cached for an hour)
   if (path === '/api/weather' && method === 'GET') return json(await getWeather(env));
 
-  // Habits
-  if (path === '/api/habits' && method === 'POST') {
-    const name = String((body && body.name) || '').trim().slice(0, 40);
-    if (!name) return json({ error: 'name required' }, 400);
-    const max = await env.DB.prepare('SELECT COALESCE(MAX(sort), 0) AS s FROM habits WHERE user_id = ?').bind(uid).first();
-    return json(await insertRow(env, 'habits', { name, sort: max.s + 1, user_id: uid }), 201);
-  }
-  if ((m = /^\/api\/habits\/(\d+)(\/toggle)?$/.exec(path)) && !(await owns(env, 'habits', +m[1], uid))) return notYours();
-  if ((m = /^\/api\/habits\/(\d+)$/.exec(path))) {
-    if (method === 'PATCH') return json(await updateRow(env, 'habits', +m[1], pick(body, ['name', 'archived', 'sort'])));
-    if (method === 'DELETE') {
-      await env.DB.batch([env.DB.prepare('DELETE FROM habit_logs WHERE habit_id = ?').bind(+m[1]), env.DB.prepare('DELETE FROM habits WHERE id = ?').bind(+m[1])]);
-      return json({ ok: true });
-    }
-  }
-  if ((m = /^\/api\/habits\/(\d+)\/toggle$/.exec(path)) && method === 'POST') {
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(body && body.date) ? body.date : localParts(new Date(), env.TZ || 'America/Chicago').date;
-    const had = await env.DB.prepare('DELETE FROM habit_logs WHERE habit_id = ? AND date = ? RETURNING habit_id').bind(+m[1], date).first();
-    if (!had) await env.DB.prepare('INSERT INTO habit_logs (habit_id, date) VALUES (?, ?)').bind(+m[1], date).run();
-    return json({ ok: true, done: !had });
-  }
-
   // Focus mode: pause nags for a while
   if (path === '/api/focus' && method === 'POST') {
     const minutes = Math.min(180, Math.max(5, +(body && body.minutes) || 25));
@@ -548,49 +512,6 @@ async function handleApi(req, env, url, ctx, uid) {
     const pid = (await env.DB.prepare('SELECT person_id FROM person_dates WHERE id = ?').bind(+m[1]).first() || {}).person_id;
     if (method === 'PATCH') { const r = await updateRow(env, 'person_dates', +m[1], pick(body, ['label', 'date', 'remind'])); await syncPeopleTasks(env, uid, pid); return json(r); }
     if (method === 'DELETE') { await env.DB.prepare('DELETE FROM person_dates WHERE id = ?').bind(+m[1]).run(); await syncPeopleTasks(env, uid, pid); return json({ ok: true }); }
-  }
-
-  // Medications
-  const medTimes = (t) => String(t || '').split(/[,\s]+/).map((x) => x.trim()).filter((x) => /^([01]?\d|2[0-3]):[0-5]\d$/.test(x))
-    .map((x) => x.padStart(5, '0')).sort().slice(0, 8).join(',');
-  // Schedule: daily / weekly (days) / monthly (day), every N
-  const medSchedule = (b) => {
-    const out = {};
-    if ('freq' in b) out.freq = ['daily', 'weekly', 'monthly'].includes(b.freq) ? b.freq : 'daily';
-    if ('interval_n' in b) out.interval_n = Math.min(52, Math.max(1, Math.round(+b.interval_n) || 1));
-    if ('weekdays' in b) out.weekdays = String(b.weekdays || '').split(',').map((x) => x.trim()).filter((x) => /^[0-6]$/.test(x)).filter((x, i, a) => a.indexOf(x) === i).sort().join(',') || null;
-    if ('month_day' in b) out.month_day = b.month_day ? Math.min(31, Math.max(1, Math.round(+b.month_day))) : null;
-    if ('start_date' in b) out.start_date = /^\d{4}-\d{2}-\d{2}$/.test(b.start_date || '') ? b.start_date : null;
-    if ('month_days' in b) out.month_days = String(b.month_days || '').split(',').map((x) => Math.round(+x)).filter((x) => x >= 1 && x <= 31)
-      .filter((x, i, a) => a.indexOf(x) === i).sort((x, y) => x - y).join(',') || null;
-    // Per-day dose times: {"1":"08:00"} keyed by weekday (0-6) or date (1-31)
-    if ('dose_times' in b) {
-      const src = b.dose_times && typeof b.dose_times === 'object' ? b.dose_times : {};
-      const clean = {};
-      for (const [k, v] of Object.entries(src)) if (/^\d{1,2}$/.test(k) && +k <= 31 && /^([01]\d|2[0-3]):[0-5]\d$/.test(v)) clean[+k] = v;
-      out.dose_times = Object.keys(clean).length ? JSON.stringify(clean) : null;
-    }
-    if ('remind' in b) out.remind = ['15m', 'hourly', 'once', 'none'].includes(b.remind) ? b.remind : 'hourly';
-    return out;
-  };
-  if (path === '/api/meds' && method === 'POST') {
-    const name = String((body && body.name) || '').trim().slice(0, 80);
-    const times = medTimes(body && body.times);
-    if (!name || !times) return json({ error: 'name and at least one time (like 08:00) required' }, 400);
-    return json(await insertRow(env, 'meds', { name, dose: body.dose ? String(body.dose).slice(0, 60) : null, times, notes: body.notes ? String(body.notes).slice(0, 300) : null, active: 1, created_at: nowIso(), user_id: uid,
-      start_date: localParts(new Date(), env.TZ || 'America/Chicago').date, ...medSchedule(body) }), 201);
-  }
-  if ((m = /^\/api\/meds\/(\d+)(\/log)?$/.exec(path)) && !(await owns(env, 'meds', +m[1], uid))) return notYours();
-  if ((m = /^\/api\/meds\/(\d+)$/.exec(path))) {
-    if (method === 'PATCH') {
-      const data = { ...pick(body, ['name', 'dose', 'notes', 'active']), ...medSchedule(body) };
-      if ('times' in body) { data.times = medTimes(body.times); if (!data.times) return json({ error: 'at least one time required' }, 400); }
-      return json(await updateRow(env, 'meds', +m[1], data));
-    }
-    if (method === 'DELETE') { await env.DB.prepare('UPDATE meds SET active = 0 WHERE id = ?').bind(+m[1]).run(); return json({ ok: true }); }
-  }
-  if ((m = /^\/api\/meds\/(\d+)\/log$/.exec(path)) && method === 'POST') {
-    return json(await logMed(env, +m[1], body && body.date, body && body.slot, (body && body.status) || 'taken'));
   }
 
   // Home maintenance
@@ -861,11 +782,13 @@ async function handleApi(req, env, url, ctx, uid) {
   }
 
   // Backup: everything that's yours plus the shared household data, as one JSON file.
+  // Every kind of task (habits, medications, Home, people dates, credits, dinners) is in tasks / task_log;
+  // everyday tasks and trip bookings are in items. Left out on purpose: push subscriptions (device keys).
   if (path === '/api/backup' && method === 'GET') {
     const all = async (sql, ...args) => (await env.DB.prepare(sql).bind(...args).all()).results;
     const people = 'SELECT id FROM people WHERE user_id = ?';
     const out = {
-      app: 'life-dashboard', version: 1, exported_at: nowIso(), person: (await all('SELECT id, name FROM users WHERE id = ?', uid))[0],
+      app: 'life-dashboard', version: 2, exported_at: nowIso(), person: (await all('SELECT id, name FROM users WHERE id = ?', uid))[0],
       yours: {
         items: await all('SELECT * FROM items WHERE user_id = ? OR shared = 1', uid),
         people: await all('SELECT * FROM people WHERE user_id = ?', uid),
@@ -874,15 +797,20 @@ async function handleApi(req, env, url, ctx, uid) {
         person_dates: await all(`SELECT * FROM person_dates WHERE person_id IN (${people})`, uid),
         tasks: await all('SELECT * FROM tasks WHERE user_id = ? OR shared = 1', uid),
         task_log: await all('SELECT l.* FROM task_log l JOIN tasks t ON t.id = l.task_id WHERE t.user_id = ? OR t.shared = 1', uid),
-        meds: await all('SELECT * FROM meds WHERE user_id = ?', uid),
-        med_logs: await all('SELECT l.* FROM med_logs l JOIN meds m ON m.id = l.med_id WHERE m.user_id = ?', uid),
         documents: await all('SELECT * FROM documents WHERE user_id = ?', uid),
         event_prefs: await eventPrefRows(env, uid),
+        calendar_events: await visibleEvents(env, uid),
         settings: await getSettings(env, uid),
       },
       shared: {
-        trips: await all('SELECT * FROM trips'), meals: 'Dinners are in yours.tasks (kind "meal")',
-        home: 'Home tasks and their history are in yours.tasks / yours.task_log (kind "home")',
+        trips: await all('SELECT * FROM trips'),
+        rewards: {
+          cards: await all('SELECT * FROM rw_cards'),
+          logs: await all('SELECT * FROM rw_logs'),
+          points: await all('SELECT * FROM rw_points'),
+          config: await all('SELECT * FROM rw_config'),
+        },
+        notes: 'Dinners, Home tasks and credits are tasks: see yours.tasks / yours.task_log (kind "meal", "home", "credit").',
       },
     };
     delete out.yours.settings.weather_cache;
@@ -1218,7 +1146,6 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
   if (!s.people_tasks_v1) { await syncPeopleTasks(env, uid); await setSetting(env, 'people_tasks_v1', nowIso(), uid); }
   if (uid === 1 && !s.credit_tasks_v1) { await syncCreditTasks(env); await setSetting(env, 'credit_tasks_v1', nowIso(), 1); }
   await ensurePeopleReminders(env, tz, local, uid);
-  // Medications are tasks now (sendTaskReminders); sendMedReminders is kept for reference only.
   report.sent.push(...await sendHomeReminders(env, tz, local, quiet, now, uid));
   report.sent.push(...await sendRewardsReminders(env, tz, local, now, uid));
   report.sent.push(...await sendTaskReminders(env, tz, local, quiet, now, uid));
@@ -1570,76 +1497,6 @@ async function ensureBackupReminder(env, tz, local, uid, s) {
       VALUES ('Download a Life backup', 'Settings › Backup › Download a backup. Save it to Files or iCloud Drive.', ?, 'once', 'backup', ?, ?)
       ON CONFLICT(external_id) DO UPDATE SET status = 'open', done_at = NULL, due_at = excluded.due_at, notify_count = 0, last_notified_at = NULL
       WHERE items.status = 'done'`).bind(due, `backup:${uid}`, uid).run();
-}
-
-// On someone's birthday (people with "remind me on their birthday" on), add a
-// "wish them happy birthday" task due 9am that nags hourly until it's done.
-async function ensureBirthdayReminders(env, tz, local, uid = 1) {
-  const mmdd = `${String(local.m).padStart(2, '0')}-${String(local.d).padStart(2, '0')}`;
-  const { results } = await env.DB.prepare("SELECT id, name FROM people WHERE user_id = ? AND bday_remind = 1 AND birthday LIKE ?").bind(uid, `%${mmdd}`).all();
-  if (!results.length) return;
-  const due = zonedToUtc(local.y, local.m, local.d, 9, 0, tz).toISOString();
-  await env.DB.batch(results.map((p) => env.DB.prepare(`INSERT OR IGNORE INTO items (title, area, due_at, nag, person_id, source, external_id, user_id)
-      VALUES (?, 'people', ?, 'hourly', ?, 'birthday', ?, ?)`).bind(`Wish ${p.name.split(' ')[0]} a happy birthday`, due, p.id, `bday:${p.id}:${local.y}`, uid)));
-}
-
-// ---------- medications ----------
-
-// Log a dose. Taking an already-taken dose is refused (double-dose guard) and
-// tells you when you took it. status: taken | skipped | undo
-async function logMed(env, medId, date, slot, status) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '') || !/^\d{2}:\d{2}$/.test(slot || '')) return { error: 'date and slot required' };
-  if (status === 'undo') {
-    await env.DB.prepare('DELETE FROM med_logs WHERE med_id = ? AND date = ? AND slot = ?').bind(medId, date, slot).run();
-    return { ok: true, undone: true };
-  }
-  const prev = await env.DB.prepare('SELECT * FROM med_logs WHERE med_id = ? AND date = ? AND slot = ?').bind(medId, date, slot).first();
-  if (prev && prev.status === 'taken') return { ok: false, already: fmtTime(prev.taken_at, env.TZ || 'America/Chicago'), log: prev };
-  await env.DB.prepare(`INSERT INTO med_logs (med_id, date, slot, taken_at, status) VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(med_id, date, slot) DO UPDATE SET taken_at = excluded.taken_at, status = excluded.status`)
-    .bind(medId, date, slot, nowIso(), status === 'skipped' ? 'skipped' : 'taken').run();
-  return { ok: true };
-}
-
-// Each scheduled dose reminds you at its time (even in quiet hours or focus, since you
-// chose the time), then hourly until you log it. Repeats respect quiet hours.
-async function sendMedReminders(env, tz, local, quiet, now, uid = 1) {
-  const { results: meds } = await env.DB.prepare("SELECT * FROM meds WHERE user_id = ? AND active = 1 AND remind != 'none'").bind(uid).all();
-  if (!meds.length) return [];
-  const { results: logs } = await env.DB.prepare('SELECT med_id, slot FROM med_logs WHERE date = ?').bind(local.date).all();
-  const logged = new Set(logs.map((l) => `${l.med_id}|${l.slot}`));
-  const sent = [];
-  for (const med of meds) {
-    // Dose times due today (none on days off: weekly / monthly / every N days)
-    for (const slot of slotsOn(med, local.date)) {
-      if (logged.has(`${med.id}|${slot}`)) continue;
-      const [h, mi] = slot.split(':').map(Number);
-      const dueAt = zonedToUtc(local.y, local.m, local.d, h, mi, tz);
-      if (now < dueAt) continue;
-      const key = `med:${med.id}:${local.date}:${slot}`;
-      const nag = await env.DB.prepare('SELECT * FROM med_nags WHERE key = ?').bind(key).first();
-      // Repeat reminders: every 15 minutes, hourly, or never ('once'); repeats wait out quiet hours.
-      const gap = med.remind === '15m' ? 14 : 58;
-      if (nag && (med.remind === 'once' || (now - Date.parse(nag.last_at)) / 60000 < gap || quiet)) continue;
-      const hhmm = slot.replace(':', '');
-      const link = async (act) => ({ action: 'http', label: act === 'taken' ? 'Taken' : 'Skip today', method: 'POST', clear: true,
-        url: `${env.PUBLIC_URL}/a/med/${med.id}/${local.date}/${hhmm}/${act}?sig=${await sign(env, `med:${med.id}:${local.date}:${hhmm}:${act}`)}` });
-      const ok = await push(env, {
-        to: uid,
-        tag: `med-${med.id}-${hhmm}`,
-        title: `${nag ? 'Still need to take' : 'Time for'} ${med.name}${med.dose ? ` (${med.dose})` : ''}`,
-        message: `Scheduled ${fmtTime(dueAt.toISOString(), tz)}${nag ? ` · reminder ${nag.count + 1}` : ''}`,
-        priority: 4, actions: [await link('taken'), await link('skip')],
-      });
-      if (ok) {
-        await env.DB.prepare(`INSERT INTO med_nags (key, last_at, count) VALUES (?, ?, 1)
-          ON CONFLICT(key) DO UPDATE SET last_at = excluded.last_at, count = med_nags.count + 1`).bind(key, now.toISOString()).run();
-        sent.push(key);
-      }
-    }
-  }
-  await env.DB.prepare('DELETE FROM med_nags WHERE last_at < ?').bind(new Date(now.getTime() - 3 * 86400000).toISOString()).run();
-  return sent;
 }
 
 // ---------- Home reminders ----------

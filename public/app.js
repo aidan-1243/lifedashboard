@@ -32,7 +32,7 @@ import * as TK from './tasks.js';
   let weatherAt = 0;
   let needLogin = false; // only used for local development (online, Cloudflare Access is the sign-in)
   let loaded = false;
-  const ui = { rwTab: 'cards', rwWho: 'all', rwType: 'all', allArea: 'all', peopleFilter: 'birthdays', peopleQuery: '', showDone: false, q: '', homeView: 'now', homeRoom: '', homeQ: '', mealWeek: 0 };
+  const ui = { allType: 'all', rwTab: 'cards', rwWho: 'all', rwType: 'all', allArea: 'all', peopleFilter: 'birthdays', peopleQuery: '', showDone: false, q: '', homeView: 'now', homeRoom: '', homeQ: '', mealWeek: 0 };
   const CIRCLES = { family: 'Family', close: 'Close friend', friends: 'Friend' };
   const inCircle = (p) => p && (p.circle === 'family' || p.circle === 'close');
 
@@ -388,11 +388,17 @@ import * as TK from './tasks.js';
     // ---------- one list: every kind of task as the same kind of row ----------
     // Today: late first, then things with no time, then by the clock. The rest of the week: by day,
     // same order inside each day. Each row: time · icon · title/detail · check (or × for all-day events).
-    const trow = ({ when = '', icon, cls = '', title, meta = '', open, done, dismiss, late = false }) => `<li class="row trow${late ? ' late-row' : ''}">
+    // Swipe right = the check button; swipe left = the row's "later" action (shown on the swipe)
+    const trow = ({ when = '', icon, cls = '', title, meta = '', open, done, dismiss, late = false, later }) => {
+      const swipe = done || later;
+      return `<li class="row trow${late ? ' late-row' : ''}${swipe ? ' sw' : ''}"${swipe ? ` data-swipe="row" data-kind="trow" data-later="${esc(later ? later.label : 'Later')}"` : ''}><div class="row-inner">
       <span class="when">${late ? '<span class="late">Late</span>' : esc(when)}</span>${kindMark(icon, cls)}
       <button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
       ${done ? `<button type="button" class="check tcheck" ${done.attrs} aria-label="${esc(done.label)}"></button>` : ''}
-      ${dismiss ? `<button type="button" class="tx" ${dismiss} aria-label="Hide for today">×</button>` : ''}</li>`;
+      ${dismiss ? `<button type="button" class="tx" ${dismiss} aria-label="Hide for today">×</button>` : ''}
+      ${later ? `<button type="button" class="tlater" ${later.attrs} hidden aria-label="${esc(later.label)}"></button>` : ''}</div></li>`;
+    };
+    const tomorrowAt = (iso) => { const d = new Date(iso); const t = new Date(+sod + DAY); t.setHours(hasTime(iso) ? d.getHours() : 9, hasTime(iso) ? d.getMinutes() : 0, 0, 0); return t.toISOString(); };
     const at = (d, hhmm) => { const [hh, mm] = hhmm.split(':').map(Number); const x = parseDay(d); x.setHours(hh, mm, 0, 0); return +x; };
     const KIND_ORDER = { late: 0, birthday: 1, pdate: 2, credit: 3, event: 4, home: 5, habit: 6, item: 7 };
     const itemIcon = (i) => (i.trip_id || i.source === 'wayfare' ? ['suitcase', 'k-trip'] : ['check', 'k-task']);
@@ -416,12 +422,14 @@ import * as TK from './tasks.js';
       for (const i of open.filter((x) => x.due_at && new Date(x.due_at) >= d0 && new Date(x.due_at) < d1 && !overdueIds.has(x.id))) {
         const timed = hasTime(i.due_at); const [ic, cl] = itemIcon(i);
         out.push({ k: 'item', at: timed ? Date.parse(i.due_at) : null, html: trow({ when: timed ? fmtShortTime(i.due_at) : '', icon: ic, cls: cl, title: esc(i.title), meta: itemMeta(i, { skipDue: true }),
-          open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `Done: ${i.title}` } }) });
+          open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `Done: ${i.title}` },
+          later: isToday ? { attrs: `data-act="snooze" data-id="${i.id}"`, label: 'Later' } : null }) });
       }
       // Medications: today every dose still to take; later days only the non-daily ones
       if (isToday) for (const x of medSlotsToday().filter((x) => !x.log)) {
         out.push({ k: 'med', at: +x.at, html: trow({ when: fmtShortTime(x.at.toISOString()), icon: 'pill', cls: 'k-med', title: `${esc(x.med.name)}${x.med.dose ? ` <span class="tdim">${esc(x.med.dose)}</span>` : ''}`,
-          meta: x.at < now ? '<span class="late">Due now</span>' : `Medication · ${esc(fmtTime(x.at.toISOString()))}`, open: `data-act="med-open" data-id="${x.med.id}"`, done: { attrs: `data-act="med-take" data-id="${x.med.id}" data-slot="${x.slot}"`, label: `Taken: ${x.med.name}` } }) });
+          meta: x.at < now ? '<span class="late">Due now</span>' : `Medication · ${esc(fmtTime(x.at.toISOString()))}`, open: `data-act="med-open" data-id="${x.med.id}"`, done: { attrs: `data-act="med-take" data-id="${x.med.id}" data-slot="${x.slot}"`, label: `Taken: ${x.med.name}` },
+          later: { attrs: `data-act="med-skip" data-id="${x.med.id}" data-slot="${x.slot}"`, label: 'Skip dose' } }) });
       } else for (const m of (data.meds || []).filter((m) => !((m.freq || 'daily') === 'daily' && (+m.interval_n || 1) === 1))) {
         for (const slot of slotsOn(m, D)) out.push({ k: 'med', at: at(D, slot), html: trow({ when: fmtSlot(slot), icon: 'pill', cls: 'k-med', title: esc(m.name), meta: `Medication · ${esc(describeSchedule(m).split(' · ')[0])}`, open: `data-act="med-open" data-id="${m.id}"` }) });
       }
@@ -430,12 +438,14 @@ import * as TK from './tasks.js';
         const o = taskOcc(t); if (o && !o.future && o.log) continue;
         const s = streakOf(t).current;
         out.push({ k: 'habit', at: t.time ? at(D, t.time) : null, html: trow({ when: t.time ? fmtSlot(t.time) : '', icon: 'check', cls: 'k-habit', title: esc(t.title), meta: `Habit${s ? ` · ${s} 🔥` : ''}`,
-          open: `data-act="task-open" data-id="${t.id}"`, done: { attrs: `data-act="habit" data-id="${t.id}"`, label: `Done: ${t.title}` } }) });
+          open: `data-act="task-open" data-id="${t.id}"`, done: { attrs: `data-act="habit" data-id="${t.id}"`, label: `Done: ${t.title}` },
+          later: { attrs: `data-act="task-skip" data-id="${t.id}" data-occ="${D}"`, label: 'Skip today' } }) });
       }
       // Home: due this day (overdue ones are in Today's late block)
       for (const { t, i } of homeTasks.filter((x) => x.i.due === D && x.i.k >= 0)) {
         out.push({ k: 'home', at: null, html: trow({ icon: 'home', cls: 'k-home', title: esc(t.name), meta: `Home · ${esc(t.room || '')}${t.est ? ` · ${esc(t.est)}` : ''}`,
-          open: `data-act="home-open" data-id="${t.id}"`, done: { attrs: `data-act="home-done" data-id="${t.id}"`, label: `Done: ${t.name}` } }) });
+          open: `data-act="home-open" data-id="${t.id}"`, done: { attrs: `data-act="home-done" data-id="${t.id}"`, label: `Done: ${t.name}` },
+          later: isToday ? { attrs: `data-act="home-week" data-id="${t.id}"`, label: 'Next week' } : null }) });
       }
       // Birthdays and important dates (checked off = gone)
       for (const t of peopleTasks.filter((t) => TK.isDueOn(t, D))) {
@@ -443,12 +453,14 @@ import * as TK from './tasks.js';
         const yrs = /^\d{4}/.test(t.date) && !t.date.startsWith('2000') ? +D.slice(0, 4) - +t.date.slice(0, 4) : null;
         out.push({ k: t.kind, at: null, html: trow({ icon: t.kind === 'birthday' ? 'balloon' : 'heart', cls: 'k-people', title: esc(t.title),
           meta: t.kind === 'birthday' ? `Birthday${yrs ? ` · turns ${yrs}` : ''}` : `Important date${yrs ? ` · ${yrs} years` : ''}`,
-          open: `data-act="task-open" data-id="${t.id}"`, done: isToday ? { attrs: `data-act="task-done" data-id="${t.id}" data-occ="${D}"`, label: t.kind === 'birthday' ? `Wished them: ${t.title}` : `Done: ${t.title}` } : null }) });
+          open: `data-act="task-open" data-id="${t.id}"`, done: isToday ? { attrs: `data-act="task-done" data-id="${t.id}" data-occ="${D}"`, label: t.kind === 'birthday' ? `Wished them: ${t.title}` : `Done: ${t.title}` } : null,
+          later: isToday ? { attrs: `data-act="task-skip" data-id="${t.id}" data-occ="${D}"`, label: 'Hide' } : null }) });
       }
       // Credits: on the day they run out
       for (const x of myCreditsOpen.filter((x) => RW.ymd(x.info.end) === D)) {
         out.push({ k: 'credit', at: null, html: trow({ icon: 'card', cls: 'k-credit', title: `${esc(x.b.name)} · ${esc(RW.money(x.left))}`, meta: `Credit ends · ${esc(x.c.name)}`,
-          open: `data-act="rw-ben" data-card="${esc(x.c.id)}" data-ben="${esc(x.b.id)}"`, done: isToday ? { attrs: `data-act="rw-use-all" data-card="${esc(x.c.id)}" data-ben="${esc(x.b.id)}"`, label: `Used: ${x.b.name}` } : null }) });
+          open: `data-act="rw-ben" data-card="${esc(x.c.id)}" data-ben="${esc(x.b.id)}"`, done: isToday ? { attrs: `data-act="rw-use-all" data-card="${esc(x.c.id)}" data-ben="${esc(x.b.id)}"`, label: `Used: ${x.b.name}` } : null,
+          later: isToday ? { attrs: `data-act="rw-not-now" data-card="${esc(x.c.id)}" data-ben="${esc(x.b.id)}"`, label: 'Not this time' } : null }) });
       }
       // Dinner (cooking only) at 5pm; tonight's drops off once eaten or after 7pm
       const ml = (data.meals || []).find((x) => x.date === D);
@@ -464,9 +476,11 @@ import * as TK from './tasks.js';
     // Today's late block: overdue tasks (nagging ones first), then overdue Home tasks
     const lateRows = [
       ...overdue.map((i) => { const [ic, cl] = itemIcon(i); return trow({ late: true, icon: ic, cls: cl, title: esc(i.title), meta: `${esc(overdueText(i.due_at))}${isNagging(i) ? ` · ${{ '15m': 'every 15 min', hourly: 'hourly', daily: 'daily' }[i.nag]}` : ''}${i.area ? ` · ${esc(AREAS[i.area] || '')}` : ''}`,
-        open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `${i.source === 'wayfare' ? 'Booked' : 'Done'}: ${i.title}` } }); }),
+        open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `${i.source === 'wayfare' ? 'Booked' : 'Done'}: ${i.title}` },
+        later: { attrs: `data-act="item-tomorrow" data-id="${i.id}" data-to="${tomorrowAt(i.due_at)}"`, label: 'Tomorrow' } }); }),
       ...homeTasks.filter((x) => x.i.k < 0).sort((a, b) => a.i.k - b.i.k).map(({ t, i }) => trow({ late: true, icon: 'home', cls: 'k-home', title: esc(t.name), meta: `Home · ${-i.k} day${i.k === -1 ? '' : 's'} late`,
-        open: `data-act="home-open" data-id="${t.id}"`, done: { attrs: `data-act="home-done" data-id="${t.id}"`, label: `Done: ${t.name}` } })),
+        open: `data-act="home-open" data-id="${t.id}"`, done: { attrs: `data-act="home-done" data-id="${t.id}"`, label: `Done: ${t.name}` },
+        later: { attrs: `data-act="home-week" data-id="${t.id}"`, label: 'Next week' } })),
     ];
     const top3 = open.filter((i) => i.top3 && !i.due_at).slice(0, 3).map((i) => trow({ icon: 'check', cls: 'k-task', title: esc(i.title), meta: `Top 3${i.area ? ` · ${esc(AREAS[i.area] || '')}` : ''}`,
       open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `Done: ${i.title}` } }));
@@ -506,6 +520,7 @@ import * as TK from './tasks.js';
       <div class="week" role="list" aria-label="Next 7 days">${days}</div>
       ${viewSetup()}
       <section aria-label="Today">${head(`Today <span class="n">${todayRows.length || ''}</span>`, { key: 'rest' })}
+        ${!isCol('rest') && overdue.length ? `<button type="button" class="link tmove" data-act="late-tomorrow" data-ids="${overdue.map((i) => i.id).join(',')}">Move ${overdue.length === 1 ? 'the late task' : `all ${overdue.length} late tasks`} to tomorrow</button>` : ''}
         ${isCol('rest') ? '' : todayRows.length ? listCard(todayRows) : `<div class="allclear">${synced ? 'Nothing else today. Enjoy it.' : 'Nothing yet. Calendar events appear once the Shortcut runs.'}</div>`}</section>
       <section aria-label="This week">${head(`This week <span class="n">${weekDays.reduce((n, x) => n + x.rows.length, 0) || ''}</span>`, { key: 'upcoming', add: 'go-meals', addLabel: 'Plan meals' })}
         ${isCol('upcoming') ? '' : weekDays.length ? weekDays.map((x) => `<div class="tday"><button type="button" class="tday-h" data-act="day" data-date="${x.D}">${esc(x.d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }))}</button>${listCard(x.rows)}</div>`).join('') : '<div class="allclear">Nothing else this week.</div>'}</section>
@@ -1428,7 +1443,6 @@ import * as TK from './tasks.js';
   // Medication sheet: preset chips; the days or dates you tap set how many doses there are.
   const MED_PRESETS = [['daily', 'Daily'], ['2day', '2× a day'], ['weekly', 'Weekly'], ['2week', '2× a week'], ['2wk', 'Every 2 weeks'], ['monthly', 'Monthly'], ['2month', '2× a month'], ['custom', 'Custom']];
   const MED_KIND = { daily: 'day', '2day': 'day', weekly: 'week', '2week': 'week', monthly: 'month', '2month': 'month', '2wk': 'every', custom: 'every' };
-  const MED_REMIND = [['15m', 'Every 15 minutes'], ['hourly', 'Every hour'], ['once', 'Once, at the dose time'], ['none', "Don't remind me"]];
   function medState(m) {
     let own = {};
     try { own = JSON.parse(m.dose_times || '{}') || {}; } catch (_) { own = {}; }
@@ -1555,65 +1569,6 @@ import * as TK from './tasks.js';
     return r;
   }
 
-  function openMed(m) {
-    const st = medState(m);
-    let hist = '';
-    if (m.id) {
-      const cells = [];
-      for (let i = 13; i >= 0; i--) {
-        const d = startOfDay(); d.setDate(d.getDate() - i);
-        const want = slotsOn(m, ymd(d)).length;
-        const taken = (data.med_logs || []).filter((l) => l.med_id === m.id && l.date === ymd(d) && l.status === 'taken').length;
-        const cls = !want ? ' off' : taken >= want ? ' full' : taken ? ' part' : '';
-        cells.push(`<span class="mday${cls}" aria-label="${esc(d.toLocaleDateString([], { month: 'short', day: 'numeric' }))}: ${taken} of ${want}"><b>${d.getDate()}</b></span>`);
-      }
-      hist = `<p class="sub">Last 14 days (filled = every dose taken, faded = no dose that day)</p><div class="mhist">${cells.join('')}</div>`;
-    }
-    sheet.innerHTML = `<form method="dialog">
-      <h3>${m.id ? esc(m.name) : 'New medication'}</h3>
-      ${hist}
-      <div class="two"><label class="field"><span>Name</span><input name="name" value="${esc(m.name || '')}" required maxlength="80"></label>
-        <label class="field"><span>Dose</span><input name="dose" value="${esc(m.dose || '')}" placeholder="10 mg" maxlength="60"></label></div>
-      <div class="field"><span>How often</span><div class="chips-wrap mpresets" role="radiogroup" aria-label="How often"></div></div>
-      <div class="mpanel"></div>
-      <p class="msum" aria-live="polite"></p>
-      <label class="field"><span>If not taken</span><select name="remind">${MED_REMIND.map(([k, v]) => `<option value="${k}"${st.remind === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
-      <label class="field"><span>Notes</span><input name="notes" value="${esc(m.notes || '')}" placeholder="with food" maxlength="300"></label>
-      <div class="actions">${m.id ? '<button type="button" class="btn danger" data-sheet="delete">Stop taking</button>' : ''}<span class="grow"></span>
-        <button type="button" class="btn ghost" data-sheet="close">Cancel</button><button type="submit" class="btn dark">Save</button></div>
-    </form>`;
-    const form = sheet.querySelector('form');
-    const draw = () => {
-      // The "2×" chips show the real count once you pick more (3× a week, etc.)
-      const count = { '2day': st.dayTimes.length, '2week': st.days.length, '2month': st.dates.length };
-      const label = (k, v) => (st.p === k && count[k] > 2 ? v.replace('2×', `${count[k]}×`) : v);
-      form.querySelector('.mpresets').innerHTML = MED_PRESETS.map(([k, v]) => `<button type="button" class="chip-btn" role="radio" aria-checked="${st.p === k}" data-mp="${k}">${label(k, v)}</button>`).join('');
-      form.querySelector('.mpanel').innerHTML = medPanel(st);
-      form.querySelector('.msum').textContent = medSummary(st);
-    };
-    draw();
-    bindMedPicker(form, st, draw);
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      const f = new FormData(form);
-      const k = MED_KIND[st.p];
-      const sch = medPickerSchedule(st, m.start_date || todayYmd());
-      if (sch.error) { toast(sch.error); return; }
-      const body = { name: f.get('name').trim(), dose: f.get('dose').trim() || null, notes: f.get('notes').trim() || null, remind: f.get('remind'), ...sch };
-      try {
-        if (m.id) await api(`/api/meds/${m.id}`, { method: 'PATCH', body }); else await api('/api/meds', { body });
-        sheet.close(); await refresh(); toast('Saved');
-      } catch (err) { toast(err.message); }
-    };
-    form.querySelector('[data-sheet="close"]').onclick = () => sheet.close();
-    const del = form.querySelector('[data-sheet="delete"]');
-    if (del) del.onclick = async () => {
-      if (!confirm(`Stop tracking ${m.name}? Its history is kept.`)) return;
-      await api(`/api/meds/${m.id}`, { method: 'DELETE' }); sheet.close(); await refresh();
-    };
-    showSheet();
-  }
-
   // ---------- contacts import with review ----------
   function openContactsReview(cards) {
     const existing = new Set(data.people.map((p) => p.external_id));
@@ -1683,13 +1638,21 @@ import * as TK from './tasks.js';
     const people = data.people.filter((p) => has(p.name, p.notes) || (data.gifts || []).some((g) => g.person_id === p.id && has(g.idea))).slice(0, 20);
     const events = data.events.filter((e) => has(e.title, e.location, e.pref && e.pref.note)).slice(0, 20);
     const trips = (data.trips || []).filter((x) => has(x.name));
-    const meds = (data.meds || []).filter((m) => has(m.name, m.notes));
+    const meds = (data.meds || []).filter((m) => has(m.name, m.notes, m.dose));
+    const habits = myHabits().filter((h) => has(h.title, (h.details || {}).notes));
+    const homes = (data.home_tasks || []).filter((h) => has(h.name, h.room, h.notes)).slice(0, 30);
+    const credits = data.rewards ? (() => { const out2 = []; for (const c of data.rewards.cards) for (const b of RW.visibleBenefits(c)) if (b.kind === 'credit' && has(b.name, c.name, b.note)) out2.push({ c, b }); return out2.slice(0, 30); })() : [];
+    const dinners = (data.tasks || []).filter((t) => t.kind === 'meal' && !t.archived && has(t.title, (t.details || {}).notes)).sort((x, y) => y.date.localeCompare(x.date)).slice(0, 20);
     const rows = [
       section('Tasks & notes', items.map((i) => itemRow(i))),
       section('People', people.map((p) => personRow(p, [p.circle ? CIRCLES[p.circle] : '', (data.gifts || []).filter((g) => g.person_id === p.id && has(g.idea)).map((g) => `gift: ${esc(g.idea)}`).join(', ')].filter(Boolean).join(' · ')))),
       section('Calendar', events.map((e) => eventRow(e, { when: weekday(e.start_at), meta: `${esc(new Date(e.start_at).toLocaleDateString([], { month: 'short', day: 'numeric' }))}${e.all_day ? '' : ` · ${esc(fmtTime(e.start_at))}`}${e.location ? ` · ${esc(e.location)}` : ''}` }))),
       section('Trips', trips.map((x) => `<li class="row"><a class="row-main" style="text-decoration:none;color:inherit" href="${esc(x.link || '#')}" target="_blank" rel="noopener"><div class="t">${esc(x.name)}</div><div class="meta">${esc(fmtRange(x.start_date, x.end_date))}</div></a></li>`)),
-      section('Medications', meds.map((m) => `<li class="row"><button type="button" class="row-main" data-act="med-open" data-id="${m.id}"><div class="t">${esc(m.name)}</div><div class="meta">${esc(describeSchedule(m))}</div></button></li>`)),
+      section('Medications', meds.map((m) => allRow({ icon: 'pill', cls: 'k-med', title: esc(m.name), meta: esc(describeSchedule(m)), open: `data-act="med-open" data-id="${m.id}"` }))),
+      section('Habits', habits.map((h) => allRow({ icon: 'check', cls: 'k-habit', title: esc(h.title), meta: `${streakOf(h).current} 🔥`, open: `data-act="task-open" data-id="${h.id}"` }))),
+      section('Home', homes.map((h) => homeRow(h, homeInfo(h)))),
+      section('Credits', credits.map(({ c, b }) => allRow({ icon: 'card', cls: 'k-credit', title: esc(b.name), meta: `${esc(rwOwner(c))}'s ${esc(c.name)}`, open: `data-act="rw-ben" data-card="${esc(c.id)}" data-ben="${esc(b.id)}"` }))),
+      section('Dinners', dinners.map((t) => allRow({ when: shortDate(t.date), icon: 'fork', cls: 'k-meal', title: esc(t.title), open: `data-act="meal-open" data-date="${t.date}"` }))),
     ].join('');
     return rows || `<div class="allclear">Nothing matches “${esc(q)}”.</div>`;
   }
@@ -1701,29 +1664,72 @@ import * as TK from './tasks.js';
     return m ? `${h} hr ${m} min` : `${h} hr`;
   }
 
+  // All: every kind of task in one place, filtered by type (and by area for everyday tasks)
+  const ALL_TYPES = [['all', 'All'], ['tasks', 'Tasks'], ['habits', 'Habits'], ['meds', 'Medications'], ['home', 'Home'], ['people', 'People'], ['credits', 'Credits'], ['dinners', 'Dinners']];
+  function allRow({ when = '', icon, cls = '', title, meta = '', open }) {
+    return `<li class="row"><span class="when">${esc(when)}</span>${kindMark(icon, cls)}<button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>`;
+  }
+  const shortDate = (D) => { const d = parseDay(D); const n = daysBetween(startOfDay(), d); return n === 0 ? 'Today' : n === 1 ? 'Tmrw' : n < 0 ? 'Late' : n < 7 ? weekday(d) : d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }); };
+  function allSections(type) {
+    const out = [];
+    const want = (k) => type === 'all' || type === k;
+    if (want('tasks')) {
+      const filter = (i) => ui.allArea === 'all' || (ui.allArea === 'none' ? !i.area : i.area === ui.allArea);
+      const open = data.items.filter((i) => i.status === 'open' && filter(i));
+      const tasks = open.filter((i) => i.kind === 'task');
+      const whenFor = (i) => { const d = daysBetween(new Date(), new Date(i.due_at)); return d === 0 ? 'Today' : d === 1 ? 'Tmrw' : d < 0 ? 'Late' : d < 7 ? weekday(i.due_at) : new Date(i.due_at).toLocaleDateString([], { month: 'numeric', day: 'numeric' }); };
+      const dated = tasks.filter((i) => i.due_at).sort((x, y) => Date.parse(x.due_at) - Date.parse(y.due_at));
+      out.push(section(`Tasks <span class="n">${tasks.length}</span>`, [...dated.map((i) => itemRow(i, { when: whenFor(i) })), ...tasks.filter((i) => !i.due_at).map((i) => itemRow(i))], type === 'tasks' ? 'No open tasks.' : null, { key: 'all-tasks' }));
+      const notes = open.filter((i) => i.kind === 'note');
+      if (notes.length) out.push(section(`Notes <span class="n">${notes.length}</span>`, notes.map((i) => itemRow(i)), null, { key: 'all-notes' }));
+    }
+    if (want('habits')) {
+      const hs = myHabits();
+      out.push(section(`Habits <span class="n">${hs.length}</span>`, hs.map((t) => { const s2 = streakOf(t); return allRow({ icon: 'check', cls: 'k-habit', title: esc(t.title), meta: `${esc(TK.describeRepeat(t))} · ${s2.current} 🔥 · best ${s2.best}`, open: `data-act="task-open" data-id="${t.id}"` }); }), type === 'habits' ? 'No habits yet. Add one in Settings.' : null, { key: 'all-habits' }));
+    }
+    if (want('meds')) {
+      const ms = data.meds || [];
+      out.push(section(`Medications <span class="n">${ms.length}</span>`, ms.map((m) => allRow({ icon: 'pill', cls: 'k-med', title: `${esc(m.name)}${m.dose ? ` <span class="tdim">${esc(m.dose)}</span>` : ''}`, meta: esc(describeSchedule(m)), open: `data-act="med-open" data-id="${m.id}"` })), type === 'meds' ? 'No medications yet.' : null, { key: 'all-meds' }));
+    }
+    if (want('home')) {
+      const hs = (data.home_tasks || []).map((t) => ({ t, i: homeInfo(t) })).filter((x) => !x.i.completed).sort((x, y) => x.i.k - y.i.k);
+      const list = type === 'home' ? hs : hs.filter((x) => x.i.k <= daysToMonthEnd(todayYmd()));
+      out.push(section(`Home <span class="n">${list.length}</span>`, list.map(({ t, i }) => homeRow(t, i)), type === 'home' ? 'No Home tasks.' : null, { key: 'all-home' }));
+    }
+    if (want('people')) {
+      const today = todayYmd();
+      const ps = (data.tasks || []).filter((t) => ['birthday', 'pdate', 'catchup'].includes(t.kind) && !t.archived)
+        .map((t) => ({ t, next: t.kind === 'catchup' ? t.date : TK.nextDate(t, today) })).filter((x) => x.next).sort((x, y) => x.next.localeCompare(y.next));
+      const list = type === 'people' ? ps : ps.filter((x) => x.next <= TK.addDays(today, 30));
+      out.push(section(`People <span class="n">${list.length}</span>`, list.map(({ t, next }) => allRow({ when: shortDate(next < today ? today : next), icon: t.kind === 'birthday' ? 'balloon' : t.kind === 'catchup' ? 'chat' : 'heart', cls: 'k-people', title: esc(t.title),
+        meta: t.kind === 'catchup' ? `Every ${(t.details || {}).every || 30} days` : esc(parseDay(next).toLocaleDateString([], { month: 'long', day: 'numeric' })), open: `data-act="task-open" data-id="${t.id}"` })), type === 'people' ? 'No birthdays, dates or catch-ups yet.' : null, { key: 'all-people' }));
+    }
+    if (want('credits') && data.rewards) {
+      const ctx = rwCtx();
+      const cr = RW.openCredits(ctx).sort((x, y) => x.days - y.days || y.left - x.left);
+      out.push(section(`Credits <span class="n">${cr.length}</span>`, cr.map((x) => allRow({ when: shortDate(RW.ymd(x.info.end)), icon: 'card', cls: 'k-credit', title: `${esc(x.b.name)} · ${esc(RW.money(x.left))}`, meta: `${esc(rwOwner(x.c))}'s ${esc(x.c.name)} · ends ${esc(rwDate(x.info.end))}`, open: `data-act="rw-ben" data-card="${esc(x.c.id)}" data-ben="${esc(x.b.id)}"` })), type === 'credits' ? 'Every credit is used.' : null, { key: 'all-credits' }));
+    }
+    if (want('dinners')) {
+      const ds = (data.meals || []).filter((m) => m.date >= todayYmd()).sort((x, y) => x.date.localeCompare(y.date));
+      out.push(section(`Dinners <span class="n">${ds.length}</span>`, ds.map((m) => allRow({ when: shortDate(m.date), icon: 'fork', cls: 'k-meal', title: esc(mealLine(m)), meta: m.notes ? esc(m.notes) : '', open: `data-act="meal-open" data-date="${m.date}"` })), type === 'dinners' ? 'No dinners planned. Tap a night in the planner.' : null, { key: 'all-dinners' }));
+    }
+    return out.join('');
+  }
+
   function viewAll() {
-    const filter = (i) => ui.allArea === 'all' || (ui.allArea === 'none' ? !i.area : i.area === ui.allArea);
-    const open = data.items.filter((i) => i.status === 'open' && filter(i));
-    const notes = open.filter((i) => i.kind === 'note');
-    const tasks = open.filter((i) => i.kind === 'task');
-    const dated = tasks.filter((i) => i.due_at).sort((a, b) => Date.parse(a.due_at) - Date.parse(b.due_at));
-    const undated = tasks.filter((i) => !i.due_at);
-    const done = data.items.filter((i) => i.status === 'done' && filter(i));
-    const chips = [['all', 'All'], ...Object.entries(AREAS), ['none', 'No area']]
-      .map(([k, v]) => `<button type="button" data-act="area" data-v="${k}" aria-pressed="${ui.allArea === k}">${v}</button>`).join('');
-    const whenFor = (i) => {
-      const d = daysBetween(new Date(), new Date(i.due_at));
-      return d === 0 ? 'Today' : d === 1 ? 'Tmrw' : d < 0 ? 'Late' : d < 7 ? weekday(i.due_at) : new Date(i.due_at).toLocaleDateString([], { month: 'numeric', day: 'numeric' });
-    };
+    const type = ui.allType || 'all';
+    const openTasks = data.items.filter((i) => i.status === 'open' && i.kind === 'task').length;
+    const done = data.items.filter((i) => i.status === 'done' && i.done_at && Date.now() - Date.parse(i.done_at) < DAY);
+    const types = ALL_TYPES.map(([k, v]) => `<button type="button" data-act="all-type" data-v="${k}" aria-pressed="${type === k}">${v}</button>`).join('');
+    const areas = [['all', 'All areas'], ...Object.entries(AREAS), ['none', 'No area']].map(([k, v]) => `<button type="button" data-act="area" data-v="${k}" aria-pressed="${ui.allArea === k}">${v}</button>`).join('');
     return `
-      <header class="head-row"><h1>Everything <span class="count">${tasks.length} open</span></h1><span class="hhead-acts"><button type="button" class="link" data-act="recent" style="min-height:36px">Recent</button><button type="button" class="sec-add" data-act="new-item" aria-label="Add a task">+</button></span></header>
-      <input class="search" id="allsearch" type="search" placeholder="Search tasks, people, events, gifts…" aria-label="Search everything" value="${esc(ui.q)}">
-      ${ui.q.trim() ? viewSearch(ui.q.trim()) : `<div class="filters" role="group" aria-label="Filter by area">${chips}</div>
-      ${section('Scheduled', dated.map((i) => itemRow(i, { when: whenFor(i) })))}
-      ${section('Anytime', undated.map((i) => itemRow(i)))}
-      ${section('Notes', notes.map((i) => itemRow(i)))}
-      ${!dated.length && !undated.length && !notes.length ? '<div class="allclear">Nothing here.</div>' : ''}
-      ${done.length ? `<button type="button" class="link" data-act="toggle-done">${ui.showDone ? 'Hide' : 'Show'} done today (${done.length})</button>
+      <header class="head-row"><h1>Everything <span class="count">${openTasks} open</span></h1><span class="hhead-acts"><button type="button" class="link" data-act="recent" style="min-height:36px">Recent</button><button type="button" class="sec-add" data-act="new-item" aria-label="Add a task">+</button></span></header>
+      <input class="search" id="allsearch" type="search" placeholder="Search everything" aria-label="Search everything" value="${esc(ui.q)}">
+      ${ui.q.trim() ? viewSearch(ui.q.trim()) : `<div class="chips-scroll filters" role="group" aria-label="Filter by type">${types}</div>
+      ${type === 'tasks' ? `<div class="chips-scroll filters" role="group" aria-label="Filter by area">${areas}</div>` : ''}
+      ${allSections(type) || '<div class="allclear">Nothing here.</div>'}
+      ${type === 'all' ? '<p class="hint">Showing Home due this month and people in the next 30 days. Pick a type to see all of them.</p>' : ''}
+      ${(type === 'all' || type === 'tasks') && done.length ? `<button type="button" class="link" data-act="toggle-done">${ui.showDone ? 'Hide' : 'Show'} done today (${done.length})</button>
         ${ui.showDone ? listCard(done.map((i) => itemRow(i))) : ''}` : ''}`}
     `;
   }
@@ -2898,7 +2904,9 @@ import * as TK from './tasks.js';
     s.row.style.setProperty('--dx', '0px');
     if (Math.abs(s.dx) < SWIPE_AT) return;
     try {
-      if (s.kind === 'home') await (s.dx > 0 ? homeLog(s.id, todayYmd()) : homeSnooze(s.id, 7));
+      // Let this one click through the post-swipe click blocker
+      if (s.kind === 'trow') { const b = s.row.querySelector(s.dx > 0 ? '.tcheck' : '.tlater'); if (b) { suppressClick = false; b.click(); suppressClick = true; } }
+      else if (s.kind === 'home') await (s.dx > 0 ? homeLog(s.id, todayYmd()) : homeSnooze(s.id, 7));
       else await (s.dx > 0 ? markDone(s.id) : snoozeHour(s.id));
     } catch (err) { toast(err.message); }
   };
@@ -2920,7 +2928,27 @@ import * as TK from './tasks.js';
     if (!el) return;
     const id = +el.dataset.id;
     const act = el.dataset.act;
+    if (act === 'all-type') { ui.allType = el.dataset.v; render(); return; }
     if (act === 'task-open') { const t = taskById(id); if (t) openTask(t); return; }
+    if (act === 'task-skip') { const t = taskById(id); if (t) taskDo(t, 'skipped', { key: el.dataset.occ }).catch((err) => toast(err.message)); return; }
+    if (act === 'med-skip') { logMed(id, el.dataset.slot, 'skipped').catch((err) => toast(err.message)); return; }
+    if (act === 'home-week') { homeSnooze(id, 7).catch((err) => toast(err.message)); return; }
+    if (act === 'rw-not-now') {
+      const c = rwCard(el.dataset.card), b = c && rwBen(c, el.dataset.ben); const p = b && RW.benUse(rwCtx(), c, b, startOfDay().getFullYear()).cur;
+      if (p) rwPatch(c, { snoozed: { ...(c.snoozed || {}), [b.id]: p.info.key } }).then(() => toast(`${b.name}: hidden until it resets`)).catch((err) => toast(err.message));
+      return;
+    }
+    if (act === 'item-tomorrow' || act === 'late-tomorrow') {
+      const ids = act === 'item-tomorrow' ? [id] : el.dataset.ids.split(',').map(Number);
+      const items = ids.map((x) => data.items.find((i) => i.id === x)).filter(Boolean);
+      (async () => {
+        // Each keeps its time of day (or 9am if it had none)
+        for (const it of items) { const t = new Date(it.due_at); const to = new Date(+startOfDay() + DAY); to.setHours(hasTime(it.due_at) ? t.getHours() : 9, hasTime(it.due_at) ? t.getMinutes() : 0, 0, 0); await api('/api/wrap/move', { body: { ids: [it.id], to: to.toISOString() } }); }
+        const undo = remember(`Moved ${plural(items.length, 'task')} to tomorrow`, { k: 'items', list: items.map((i) => ({ id: i.id, prev: { due_at: i.due_at } })) });
+        await refresh(); toast(`Moved ${plural(items.length, 'task')} to tomorrow`, undo);
+      })().catch((err) => toast(err.message));
+      return;
+    }
     if (act === 'task-done') {
       const t = taskById(id); if (!t) return;
       (el.closest('.row') || el).classList.add('completing'); await new Promise((r) => setTimeout(r, 260));

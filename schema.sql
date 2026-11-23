@@ -105,6 +105,11 @@ CREATE TABLE IF NOT EXISTS person_dates (
   UNIQUE (person_id, label, date)
 );
 
+-- ---- Old tables, replaced by tasks / task_log (docs/tasks-design.md) ----
+-- Kept here only so the older migrations still run on a new database;
+-- migrations/2026-11-25-drop-old-tables.sql removes them (meds, med_logs, med_nags, meals,
+-- home_tasks, home_log, habits, habit_logs). Nothing in the app reads them.
+
 -- Medications: scheduled doses, a taken log, and reminder state
 CREATE TABLE IF NOT EXISTS meds (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +187,8 @@ CREATE TABLE IF NOT EXISTS habit_logs (
   date TEXT NOT NULL,             -- YYYY-MM-DD, local
   PRIMARY KEY (habit_id, date)
 );
+
+-- ---- end of old tables ----
 
 -- Leave-by alerts already sent (so a re-sync doesn't repeat them)
 CREATE TABLE IF NOT EXISTS event_alerts (
