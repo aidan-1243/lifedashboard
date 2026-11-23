@@ -11,6 +11,7 @@ self.addEventListener('push', (e) => {
     body: d.body || '',
     tag: d.tag || undefined,
     renotify: !!d.tag,
+    icon: '/icon-192.png',
     data: { url: d.url || '/#today' },
   }));
 });

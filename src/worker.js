@@ -696,11 +696,6 @@ async function handleApi(req, env, url, ctx, uid) {
     else {
       const text = await req.text();
       events = parseEventLines(text);
-      // Shape check only (no titles or places): helps spot a Shortcut that isn't sending calendar names.
-      const lines = text.split(/\r?\n(?=\s*\d{4}-\d{2}-\d{2})/).filter((l) => l.trim());
-      await setSetting(env, 'events_sync_shape', JSON.stringify({ at: nowIso(), lines: lines.length,
-        mentionCal: lines.filter((l) => /cal:/i.test(l)).length, withCalendar: events.filter((e) => e.calendar).length,
-        fields: lines.slice(0, 5).map((l) => l.split('|').length), lastStarts: lines.slice(0, 5).map((l) => (l.split('|').pop() || '').trim().slice(0, 4)) }), uid);
     }
     return json(await syncEvents(env, events, uid));
   }
@@ -723,6 +718,38 @@ async function handleApi(req, env, url, ctx, uid) {
     delete out.weather_cache;
     return json(out);
   }
+  // Backup: everything that's yours plus the shared household data, as one JSON file.
+  if (path === '/api/backup' && method === 'GET') {
+    const all = async (sql, ...args) => (await env.DB.prepare(sql).bind(...args).all()).results;
+    const people = 'SELECT id FROM people WHERE user_id = ?';
+    const out = {
+      app: 'life-dashboard', version: 1, exported_at: nowIso(), person: (await all('SELECT id, name FROM users WHERE id = ?', uid))[0],
+      yours: {
+        items: await all('SELECT * FROM items WHERE user_id = ? OR shared = 1', uid),
+        people: await all('SELECT * FROM people WHERE user_id = ?', uid),
+        contact_log: await all(`SELECT * FROM contact_log WHERE person_id IN (${people})`, uid),
+        gifts: await all(`SELECT * FROM gifts WHERE person_id IN (${people})`, uid),
+        person_dates: await all(`SELECT * FROM person_dates WHERE person_id IN (${people})`, uid),
+        habits: await all('SELECT * FROM habits WHERE user_id = ?', uid),
+        habit_logs: await all('SELECT l.* FROM habit_logs l JOIN habits h ON h.id = l.habit_id WHERE h.user_id = ?', uid),
+        meds: await all('SELECT * FROM meds WHERE user_id = ?', uid),
+        med_logs: await all('SELECT l.* FROM med_logs l JOIN meds m ON m.id = l.med_id WHERE m.user_id = ?', uid),
+        documents: await all('SELECT * FROM documents WHERE user_id = ?', uid),
+        event_prefs: await eventPrefRows(env, uid),
+        settings: await getSettings(env, uid),
+      },
+      shared: {
+        trips: await all('SELECT * FROM trips'), meals: await all('SELECT * FROM meals'),
+        home_tasks: await all('SELECT * FROM home_tasks'), home_log: await all('SELECT * FROM home_log'),
+      },
+    };
+    delete out.yours.settings.weather_cache;
+    await setSetting(env, 'last_backup_at', nowIso(), uid);
+    await env.DB.prepare("UPDATE items SET status = 'done', done_at = ? WHERE external_id = ? AND status = 'open'").bind(nowIso(), `backup:${uid}`).run();
+    const day = localParts(new Date(), env.TZ || 'America/Chicago').date;
+    return new Response(JSON.stringify(out, null, 1), { headers: { 'content-type': 'application/json', 'content-disposition': `attachment; filename="life-backup-${day}.json"` } });
+  }
+
   // Life's own notifications: this device's push subscription
   if (path === '/api/push/subscribe' && method === 'POST') {
     const ep = String((body && body.endpoint) || '');
@@ -787,9 +814,12 @@ function parseEventLines(text) {
     const calendar = parts.length > 4 && /^cal:/i.test(parts[parts.length - 1]) ? parts.pop().slice(4).trim() : null;
     const [start, end, allDay] = parts;
     let rest = parts.slice(3), location = null, travel = null;
-    if (rest.length >= 3 && /^\d*(\.\d+)?$/.test(rest[rest.length - 1])) { travel = rest.pop(); location = rest.pop(); }
+    // With "cal:" the Shortcut always sends title|location, so the location is the last piece and
+    // any bars before it belong to the title ("Flight 1 of 2 | DL123").
+    if (calendar && rest.length >= 2) location = rest.pop();
+    else if (rest.length >= 3 && /^\d*(\.\d+)?$/.test(rest[rest.length - 1])) { travel = rest.pop(); location = rest.pop(); }
     else if (rest.length === 2) location = rest.pop();
-    return { start, end: end || '', allDay: /^(yes|true|1)$/i.test(allDay || ''), title: rest.join('|'), location: location || null, travelMinutes: travel, calendar };
+    return { start, end: end || '', allDay: /^(yes|true|1)$/i.test(allDay || ''), title: rest.join(' | '), location: location || null, travelMinutes: travel, calendar };
   });
 }
 
@@ -880,36 +910,6 @@ function weatherLine(w) {
   if (!w || !w.configured || w.error || !w.periods) return null;
   const day = w.periods.find((x) => x.day), night = w.periods.find((x) => !x.day);
   return `${w.now.temp}° now, ${w.now.text.toLowerCase()}${day ? ` · high ${day.temp}°` : ''}${night ? ` · low ${night.temp}°` : ''}${day && day.rain ? ` · ${day.rain}% rain` : ''}`;
-}
-
-// ---------- leave-by alerts ----------
-
-async function sendLeaveAlerts(env, tz, s, now) {
-  const soon = new Date(now.getTime() + 4 * 3600000).toISOString();
-  const { results } = await env.DB.prepare('SELECT * FROM events WHERE all_day = 0 AND start_at > ? AND start_at <= ?')
-    .bind(now.toISOString(), soon).all();
-  const prefs = await loadEventPrefs(env);
-  const sent = [];
-  for (const e of results) {
-    const p = eventPref(e, prefs, s);
-    // Alert when the event has a place (unless you turned it off), or when you turned it on.
-    if (p.hidden || p.leave === 0 || (!e.location && p.leave !== 1)) continue;
-    const travel = p.travel_min !== null ? p.travel_min
-      : e.travel_min !== null && e.travel_min !== undefined ? e.travel_min : (+s.default_travel || 30);
-    const leaveAt = Date.parse(e.start_at) - (travel + 5) * 60000; // 5 minutes to get out the door
-    if (now.getTime() < leaveAt - 8 * 60000) continue;             // the cron runs every 15 minutes
-    const key = `${e.start_at}|${e.title}`;
-    const fresh = await env.DB.prepare('INSERT OR IGNORE INTO event_alerts (key, at) VALUES (?, ?) RETURNING key').bind(key, now.toISOString()).first();
-    if (!fresh) continue;
-    await push(env, {
-      title: `Leave by ${fmtTime(new Date(leaveAt).toISOString(), tz)}: ${e.title}`,
-      message: [`Starts ${fmtTime(e.start_at, tz)}`, e.location, `about ${travel} min away`].filter(Boolean).join(' · '),
-      priority: 4,
-    });
-    sent.push(`leave:${e.title}`);
-  }
-  await env.DB.prepare('DELETE FROM event_alerts WHERE at < ?').bind(new Date(now.getTime() - 3 * 86400000).toISOString()).run();
-  return sent;
 }
 
 // ---------- item sync (e.g. Wayfare bookings) ----------
@@ -1067,9 +1067,9 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
     if (ok) { await setSetting(env, 'last_briefing', local.date, uid); report.sent.push('briefing'); }
     else await setSetting(env, 'last_push_error', `${now.toISOString()} · briefing (user ${uid}) · ${lastPushError}`);
   }
+  await ensureBackupReminder(env, tz, local, uid, s);
   await ensureBirthdayReminders(env, tz, local, uid);
   await ensurePeopleReminders(env, tz, local, uid);
-  // Leave-by notifications were turned off (2026-11-23, your choice); sendLeaveAlerts is kept but no longer called.
   report.sent.push(...await sendMedReminders(env, tz, local, quiet, now, uid));
   report.sent.push(...await sendHomeReminders(env, tz, local, quiet, now, uid));
   const wrapHour = s.wrap_hour === '' || s.wrap_hour === undefined ? 21 : +s.wrap_hour;
@@ -1093,33 +1093,66 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
   const { results } = await env.DB.prepare(`SELECT * FROM items WHERE user_id = ? AND status = 'open' AND kind = 'task' AND nag != 'none'
     AND due_at IS NOT NULL AND due_at <= ? AND (snooze_until IS NULL OR snooze_until <= ?)`).bind(uid, now.toISOString(), now.toISOString()).all();
 
-  for (const item of results) {
+  // Which items are due for a reminder this run
+  const due = results.filter((item) => {
     const sinceMin = item.last_notified_at ? (now - Date.parse(item.last_notified_at)) / 60000 : Infinity;
-    const due = item.nag === 'once' ? item.notify_count === 0 : sinceMin >= (NAG_GAP_MIN[item.nag] || 58);
-    if (!due) continue;
+    return item.nag === 'once' ? item.notify_count === 0 : sinceMin >= (NAG_GAP_MIN[item.nag] || 58);
+  });
+  const markSent = async (items) => {
+    await env.DB.batch(items.map((it) => env.DB.prepare('UPDATE items SET last_notified_at = ?, notify_count = notify_count + 1 WHERE id = ?').bind(now.toISOString(), it.id)));
+    report.sent.push(...items.map((it) => it.id));
+  };
+  const whenText = (item) => {
     const overdueMin = (now - Date.parse(item.due_at)) / 60000;
-    const when = overdueMin < 60 ? 'due now' : overdueMin < 1440 ? `overdue ${Math.round(overdueMin / 60)}h` : `overdue ${Math.floor(overdueMin / 1440)}d`;
+    return overdueMin < 60 ? 'due now' : overdueMin < 1440 ? `overdue ${Math.round(overdueMin / 60)}h` : `overdue ${Math.floor(overdueMin / 1440)}d`;
+  };
+
+  // Bookings from the same Wayfare trip go out as one notification instead of one each.
+  const { results: trips } = await env.DB.prepare('SELECT name, external_id FROM trips WHERE external_id IS NOT NULL').all();
+  const tripOf = (item) => (item.source === 'wayfare' ? trips.find((t) => (item.external_id || '').startsWith(`${t.external_id}:`)) : null);
+  const groups = new Map();
+  for (const item of due) { const t = tripOf(item); if (t) { if (!groups.has(t.external_id)) groups.set(t.external_id, { trip: t, items: [] }); groups.get(t.external_id).items.push(item); } }
+  for (const { trip, items } of groups.values()) {
+    if (items.length < 2) continue;
+    const names = items.map((it) => it.title.replace(/^Book\s+/i, ''));
+    const late = items.filter((it) => Date.parse(it.due_at) < now - 3600000).length;
+    const ok = await push(env, {
+      to: uid, tag: `trip-${trip.external_id}`.slice(0, 32),
+      title: `${trip.name}: ${items.length} bookings ${late ? 'overdue' : 'due'}`,
+      message: `${names.slice(0, 4).join(', ')}${names.length > 4 ? ` +${names.length - 4} more` : ''}`,
+      priority: items.some((it) => it.nag !== 'once') ? 4 : 3,
+    });
+    if (ok) await markSent(items);
+    for (const it of items) it.grouped = true;
+  }
+
+  for (const item of due) {
+    if (item.grouped) continue;
     const repeating = item.nag === 'once' ? '' : ` · reminder ${item.notify_count + 1}`;
     const isBooking = item.source === 'wayfare';
-    const isDaily = item.nag === 'daily';
-    const actions = [
-      await actionButton(env, item.id, 'done', isBooking ? 'Booked' : 'Done'),
-      await actionButton(env, item.id, isDaily || isBooking ? 'tomorrow' : 'snooze', isDaily || isBooking ? 'Tomorrow' : 'Snooze 1h'),
-    ];
     const ok = await push(env, {
       to: uid,
       tag: `item-${item.id}`,
       title: item.title,
-      message: [AREA_LABEL[item.area], isBooking ? 'from Wayfare' : null, when].filter(Boolean).join(' · ') + repeating,
+      message: [AREA_LABEL[item.area], isBooking ? 'from Wayfare' : null, whenText(item)].filter(Boolean).join(' · ') + repeating,
       priority: item.nag === 'once' ? 3 : 4,
-      actions,
+      // Done / Snooze buttons only show through ntfy (Life's own notifications open the app instead)
+      actions: [await actionButton(env, item.id, 'done', isBooking ? 'Booked' : 'Done'),
+        await actionButton(env, item.id, item.nag === 'daily' || isBooking ? 'tomorrow' : 'snooze', item.nag === 'daily' || isBooking ? 'Tomorrow' : 'Snooze 1h')],
     });
-    if (ok) {
-      await env.DB.prepare('UPDATE items SET last_notified_at = ?, notify_count = notify_count + 1 WHERE id = ?').bind(now.toISOString(), item.id).run();
-      report.sent.push(item.id);
-    }
+    if (ok) await markSent([item]);
   }
   return report;
+}
+
+// Once a month: a "Download a Life backup" task (done automatically when you download one).
+async function ensureBackupReminder(env, tz, local, uid, s) {
+  if (s.last_backup_at && Date.now() - Date.parse(s.last_backup_at) < 30 * 86400000) return;
+  const due = zonedToUtc(local.y, local.m, local.d, 9, 0, tz).toISOString();
+  await env.DB.prepare(`INSERT INTO items (title, notes, due_at, nag, source, external_id, user_id)
+      VALUES ('Download a Life backup', 'Settings › Backup › Download a backup. Save it to Files or iCloud Drive.', ?, 'once', 'backup', ?, ?)
+      ON CONFLICT(external_id) DO UPDATE SET status = 'open', done_at = NULL, due_at = excluded.due_at, notify_count = 0, last_notified_at = NULL
+      WHERE items.status = 'done'`).bind(due, `backup:${uid}`, uid).run();
 }
 
 // On someone's birthday (people with "remind me on their birthday" on), add a

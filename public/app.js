@@ -1553,6 +1553,11 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
         <div class="btns"><button type="button" class="btn ghost" data-act="test-push">Send a test</button>
         <button type="button" class="btn ghost" data-act="briefing">Send briefing now</button></div>
       </div>
+      <div class="setting">
+        <strong>Backup</strong>
+        <p>Downloads everything that's yours plus the shared Home, dinners and trips as one file. Save it to Files or iCloud Drive. ${s.last_backup_at ? `Last backup: ${esc(fmtDay(s.last_backup_at))}.` : 'No backup yet.'} Life adds a reminder once a month.</p>
+        <div class="btns"><button type="button" class="btn ghost" data-act="backup">Download a backup</button></div>
+      </div>
       <h2 class="set-group" id="set-today">Today</h2>
       <div class="setting">
         <strong>Weather</strong>
@@ -2167,6 +2172,25 @@ import { homeDue, daysToMonthEnd, FREQS as HOME_FREQS, TYPES as HOME_TYPES, mont
     if (!el) return;
     const id = +el.dataset.id;
     const act = el.dataset.act;
+    if (act === 'backup') {
+      (async () => {
+        const res = await fetch('/api/backup', { headers: token ? { authorization: `Bearer ${token}` } : {} });
+        if (!res.ok) throw new Error("Couldn't make the backup");
+        const blob = await res.blob();
+        const name = (/filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '') || [])[1] || 'life-backup.json';
+        const file = new File([blob], name, { type: 'application/json' });
+        // iPhone: the share sheet offers "Save to Files"; elsewhere a normal download
+        const download = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); };
+        let shared = false;
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          try { await navigator.share({ files: [file] }); shared = true; }
+          catch (err) { shared = err && err.name === 'AbortError'; } // closed the sheet: fine; not allowed: download instead
+        }
+        if (!shared) download();
+        await refresh(); toast('Backup ready');
+      })().catch((err) => toast(err.message));
+      return;
+    }
     if (act === 'push-on') { turnOnPush().catch((err) => toast(`Couldn't turn on notifications: ${err.message}`)); return; }
     if (act === 'push-off') { turnOffPush().catch((err) => toast(err.message)); return; }
     // A quick check-off animation before the list updates
