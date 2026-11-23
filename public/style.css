@@ -1059,3 +1059,4 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 .tk-strip i.open { box-shadow: inset 0 0 0 1.5px var(--edge); background: transparent; }
 .tk-all .tk-row { font-size: 15px; }
 .habit .hstreak { font-variant-numeric: tabular-nums; }
+.tk-dose { font-size: 15px; font-weight: 600; color: var(--muted); }

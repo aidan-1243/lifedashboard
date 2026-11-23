@@ -159,6 +159,7 @@ import * as TK from './tasks.js';
 
   async function refresh() {
     data = await api('/api/state');
+    medsFromTasks();
     loaded = true;
     if (window.lifeTheme && data.settings && data.settings.weather_lat) window.lifeTheme.setLocation(data.settings.weather_lat, data.settings.weather_lon);
     if (window.lifeTheme && data.settings && data.settings.palette) window.lifeTheme.setPalette(data.settings.palette);
@@ -590,13 +591,25 @@ import * as TK from './tasks.js';
     </a>`;
   }
 
+  // Medications are tasks (kind "med"). The medication lists still read data.meds / data.med_logs,
+  // so build those from the tasks in the shape they expect.
+  function medsFromTasks() {
+    const mine = (data.tasks || []).filter((t) => t.kind === 'med' && (!data.me || t.user_id === data.me.id));
+    data.meds = mine.map((t) => { const sch = TK.asSchedule(t) || {}; const d = t.details || {};
+      return { id: t.id, task: t, name: t.title, dose: d.dose || null, notes: d.notes || null, ...sch, times: sch.times || t.time || '08:00', remind: t.nag ? 'hourly' : 'none', active: 1 }; });
+    const ids = new Set(mine.map((t) => t.id));
+    data.med_logs = (data.task_log || []).filter((l) => ids.has(l.task_id) && l.occ.length > 10)
+      .map((l) => ({ med_id: l.task_id, date: l.occ.slice(0, 10), slot: l.occ.slice(11), status: l.status === 'skipped' ? 'skipped' : 'taken', taken_at: l.at }));
+  }
+
   // ---------- tasks (the one task model; see docs/tasks-design.md) ----------
   const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const myHabits = () => (data.tasks || []).filter((t) => t.kind === 'habit' && (!data.me || t.user_id === data.me.id));
   const taskById = (id) => (data.tasks || []).find((t) => t.id === id);
   const taskLog = (t) => (data.task_log || []).filter((l) => l.task_id === t.id);
-  const TASK_MAIN = { habit: 'Done', task: 'Done' };
-  const TASK_ICON = { habit: 'check', task: 'check' };
+  const TASK_MAIN = { habit: 'Done', task: 'Done', med: 'Taken' };
+  const TASK_ICON = { habit: 'check', task: 'check', med: 'pill' };
+  const TASK_NOUN = { habit: 'habit', task: 'task', med: 'medication' };
   const dayLabel = (d) => { const t = todayYmd(); if (d === t) return 'Today'; if (d === TK.addDays(t, 1)) return 'Tomorrow'; if (d === TK.addDays(t, -1)) return 'Yesterday'; return parseDay(d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }); };
 
   // The occurrence the main button acts on: today's first one not done, a missed one-off,
@@ -642,15 +655,16 @@ import * as TK from './tasks.js';
     const lastDone = isNew ? null : taskLog(t).filter((l) => l.status !== 'skipped').sort((a, z) => z.occ.localeCompare(a.occ))[0];
     sheet.innerHTML = `<form method="dialog" class="tk-sheet">
       <div class="tk-head"><span class="tk-icon">${kindMark(TASK_ICON[t.kind] || 'check', 'k-task')}</span>
-        <div class="tk-title"><h3>${isNew ? `New ${t.kind === 'habit' ? 'habit' : 'task'}` : esc(t.title)}</h3>${status ? `<p class="sub">${esc(status)}</p>` : ''}</div>
+        <div class="tk-title"><h3>${isNew ? `New ${TASK_NOUN[t.kind] || 'task'}` : esc(t.title)}${!isNew && details.dose ? ` <span class="tk-dose">${esc(details.dose)}</span>` : ''}</h3>${status ? `<p class="sub">${esc(status)}</p>` : ''}</div>
         ${isNew ? '' : flame(st.current)}</div>
       ${isNew || !occ ? '' : `<div class="tk-main">
         ${done ? `<button type="button" class="btn ok big" data-tk="undo">✓ ${esc(TASK_MAIN[t.kind] || 'Done')} · Undo</button>` : `<button type="button" class="btn dark big" data-tk="done">${esc(TASK_MAIN[t.kind] || 'Done')}</button>`}
-        ${done ? '' : `<div class="btns2"><button type="button" class="btn ghost" data-tk="skip">Skip${occ.future ? '' : ' this time'}</button>${t.nag ? '<button type="button" class="btn ghost" data-tk="snooze">Snooze 1h</button>' : ''}</div>`}
+        ${done ? '' : `<div class="btns2"><button type="button" class="btn ghost" data-tk="skip">${t.kind === 'med' ? 'Skip this dose' : `Skip${occ.future ? '' : ' this time'}`}</button>${t.nag ? '<button type="button" class="btn ghost" data-tk="snooze">Snooze 1h</button>' : ''}</div>`}
       </div>`}
       <div class="lbl">Details</div>
       <div class="tk-group">
-        <label class="tk-row tk-in"><span>Name</span><input name="title" value="${esc(t.title || '')}" required maxlength="120" placeholder="${t.kind === 'habit' ? 'Workout' : 'Call the plumber'}"></label>
+        <label class="tk-row tk-in"><span>Name</span><input name="title" value="${esc(t.title || '')}" required maxlength="120" placeholder="${{ habit: 'Workout', med: 'Vitamin D' }[t.kind] || 'Call the plumber'}"></label>
+        ${t.kind === 'med' ? `<label class="tk-row tk-in"><span>Dose</span><input name="dose" value="${esc(details.dose || '')}" maxlength="60" placeholder="10 mg"></label>` : ''}
         <label class="tk-row tk-in"><span>Notes</span><input name="notes" value="${esc(details.notes || '')}" maxlength="300" placeholder="Optional"></label>
       </div>
       <div class="lbl">Schedule</div>
@@ -715,7 +729,8 @@ import * as TK from './tasks.js';
       e.preventDefault();
       const f = new FormData(form);
       const hasDate = !!form.has_date.checked, repeat = hasDate ? f.get('repeat') : 'never';
-      const body = { kind: t.kind, title: f.get('title').trim(), details: { ...details, notes: f.get('notes').trim() || undefined },
+      if (t.kind === 'med' && (!hasDate || (repeat !== 'custom' && !form.has_time.checked))) { toast('Medications need a date and a time'); return; }
+      const body = { kind: t.kind, title: f.get('title').trim(), details: { ...details, notes: f.get('notes').trim() || undefined, ...(f.has('dose') ? { dose: f.get('dose').trim() || undefined } : {}) },
         date: hasDate ? f.get('date') : null, time: hasDate && form.has_time.checked && repeat !== 'custom' ? f.get('time') : null, repeat, custom: null,
         nag: form.nag.checked ? 1 : 0, nag_mode: f.get('nag_mode'), nag_time: f.get('nag_time'), nag_dow: +f.get('nag_dow') };
       if (f.has('remind_to')) body.remind_to = f.get('remind_to') === '' ? null : +f.get('remind_to');
@@ -1032,7 +1047,7 @@ import * as TK from './tasks.js';
         for (const [id, snz] of Object.entries(u.snooze || {})) if (snz) await api(`/api/home/tasks/${id}`, { method: 'PATCH', body: { snooze_until: snz } });
       } else if (u.k === 'home-snooze') await api(`/api/home/tasks/${u.id}`, { method: 'PATCH', body: { snooze_until: u.prev } });
       else if (u.k === 'habit') await api(`/api/tasks/${u.id}/log`, { body: { occ: u.occ, status: u.was ? 'done' : 'undo' } });
-      else if (u.k === 'med') await api(`/api/meds/${u.id}/log`, { body: { date: u.date, slot: u.slot, status: 'undo' } });
+      else if (u.k === 'med') await api(`/api/tasks/${u.id}/log`, { body: { occ: `${u.date} ${u.slot}`, status: 'undo' } });
       else if (u.k === 'meal-eaten') await api(`/api/meals/${u.date}/eaten`, { body: { eaten: 0 } });
       else if (u.k === 'contact') await api(`/api/people/${u.id}`, { method: 'PATCH', body: u.prev });
       e.undone = true; saveHistory();
@@ -1251,7 +1266,7 @@ import * as TK from './tasks.js';
       const n = +id;
       if (kind === 'event') openEvent(data.events.find((x) => x.id === n));
       else if (kind === 'item') openItem(data.items.find((x) => x.id === n));
-      else if (kind === 'med') openMed(data.meds.find((x) => x.id === n));
+      else if (kind === 'med') { const t = taskById(n); if (t) openTask(t); }
       else if (kind === 'home') openHomeTask(data.home_tasks.find((x) => x.id === n));
       else if (kind === 'person') openPerson(data.people.find((x) => x.id === n));
       else if (kind === 'trip') openTrip(data.trips.find((x) => x.id === n));
@@ -1308,9 +1323,10 @@ import * as TK from './tasks.js';
   }
 
   async function logMed(id, slot, status = 'taken') {
-    const res = await api(`/api/meds/${id}/log`, { body: { date: todayYmd(), slot, status } });
-    if (res.already) { toast(`Already taken today at ${res.already}. Not logged twice.`); return; }
     const m = (data.meds || []).find((x) => x.id === id);
+    const prev = (data.med_logs || []).find((l) => l.med_id === id && l.date === todayYmd() && l.slot === slot);
+    if (status === 'taken' && prev && prev.status === 'taken') { toast(`Already taken today at ${fmtTime(prev.taken_at)}. Not logged twice.`); return; }
+    await api(`/api/tasks/${id}/log`, { body: { occ: `${todayYmd()} ${slot}`, status: status === 'taken' ? 'done' : status } });
     const undo = status === 'undo' ? null : remember(`${status === 'skipped' ? 'Skipped' : 'Took'} ${m ? m.name : 'dose'} (${fmtTime(slotDate(slot).toISOString())})`, { k: 'med', id, date: todayYmd(), slot });
     await refresh();
     toast(status === 'undo' ? 'Undone' : status === 'skipped' ? 'Skipped for today' : `${m ? m.name : 'Dose'} logged as taken`, undo);
@@ -2752,8 +2768,8 @@ import * as TK from './tasks.js';
       }
       else if (act === 'med-take') await logMed(id, el.dataset.slot, 'taken');
       else if (act === 'med-undo') { if (confirm('Undo this dose?')) await logMed(id, el.dataset.slot, 'undo'); }
-      else if (act === 'med-open') openMed(data.meds.find((m) => m.id === id));
-      else if (act === 'med-new') openMed({});
+      else if (act === 'med-open') { const t = taskById(id); if (t) openTask(t); }
+      else if (act === 'med-new') openTask({ kind: 'med', repeat: 'daily', time: '08:00', nag: 1, nag_mode: 'hourly' });
       else if (act === 'wrap-move') {
         const ids = el.dataset.ids.split(',').map(Number);
         const t = startOfDay(); t.setDate(t.getDate() + 1); t.setHours(9, 0, 0, 0);

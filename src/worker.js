@@ -1179,7 +1179,7 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
   await ensureBackupReminder(env, tz, local, uid, s);
   await ensureBirthdayReminders(env, tz, local, uid);
   await ensurePeopleReminders(env, tz, local, uid);
-  report.sent.push(...await sendMedReminders(env, tz, local, quiet, now, uid));
+  // Medications are tasks now (sendTaskReminders); sendMedReminders is kept for reference only.
   report.sent.push(...await sendHomeReminders(env, tz, local, quiet, now, uid));
   report.sent.push(...await sendRewardsReminders(env, tz, local, now, uid));
   report.sent.push(...await sendTaskReminders(env, tz, local, quiet, now, uid));
@@ -1262,7 +1262,7 @@ function taskFields(b) {
   const out = {};
   const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(v || '') ? v : null);
   if ('title' in b) out.title = String(b.title || '').trim().slice(0, 120);
-  if ('kind' in b) out.kind = ['task', 'habit'].includes(b.kind) ? b.kind : 'task';
+  if ('kind' in b) out.kind = ['task', 'habit', 'med'].includes(b.kind) ? b.kind : 'task';
   if ('details' in b) out.details = b.details && typeof b.details === 'object' ? JSON.stringify(b.details).slice(0, 4000) : null;
   if ('date' in b) out.date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : null;
   if ('time' in b) out.time = hhmm(b.time);
@@ -1310,7 +1310,7 @@ async function sendTaskReminders(env, tz, local, quiet, now, uid) {
     if ((!t.repeat || t.repeat === 'never') && t.date && t.date < local.date) occs.push({ key: TK.occKey(t.date, t.time || ''), tm: '', late: true });
     const open = occs.filter((o) => !done.has(`${t.id}|${o.key}`) && (o.late || !o.tm || minutesNow >= +o.tm.slice(0, 2) * 60 + +o.tm.slice(3)));
     if (!open.length) continue;
-    let key;
+    let key, first = true;
     if (t.nag_mode === 'daily' || t.nag_mode === 'weekly') {
       const [h, mi] = String(t.nag_time || '09:00').split(':').map(Number);
       if (minutesNow < h * 60 + mi) continue;
@@ -1318,15 +1318,22 @@ async function sendTaskReminders(env, tz, local, quiet, now, uid) {
       key = `task:${t.id}:${uid}:${local.date}`;
       if (await env.DB.prepare('SELECT 1 FROM task_nags WHERE key = ?').bind(key).first()) continue;
     } else {
-      if (quiet) continue;
       if (open.every((o) => !o.tm && !o.late) && minutesNow < 9 * 60) continue; // date-only: start at 9am
       key = `task:${t.id}:${uid}:hourly`;
       const nag = await env.DB.prepare('SELECT last_at FROM task_nags WHERE key = ?').bind(key).first();
       if (nag && (now - Date.parse(nag.last_at)) / 60000 < 58) continue;
+      // A timed occurrence always gets its first reminder at its time (you chose it), even in
+      // quiet hours; the repeats wait until quiet hours end.
+      const o0 = open[0];
+      const firstForThis = o0.tm && (!nag || Date.parse(nag.last_at) < zonedToUtc(local.y, local.m, local.d, +o0.tm.slice(0, 2), +o0.tm.slice(3), tz).getTime());
+      if (quiet && !firstForThis) continue;
+      first = !o0.tm || firstForThis;
     }
     const o = open[0];
-    const when = o.late ? `was due ${o.key.slice(5, 10).replace('-', '/')}` : o.tm ? `at ${o.tm}` : 'today';
-    const ok = await push(env, { to: uid, tag: `task-${t.id}`, title: t.title, message: `${t.kind === 'habit' ? 'Habit' : 'Task'} · ${when}`, priority: 4 });
+    const when = o.late ? `was due ${o.key.slice(5, 10).replace('-', '/')}` : o.tm ? `scheduled ${fmtTime(zonedToUtc(local.y, local.m, local.d, +o.tm.slice(0, 2), +o.tm.slice(3), tz).toISOString(), tz)}` : 'today';
+    const dose = t.details && t.details.dose ? ` (${t.details.dose})` : '';
+    const title = t.kind === 'med' ? `${first ? 'Time for' : 'Still need to take'} ${t.title}${dose}` : t.title;
+    const ok = await push(env, { to: uid, tag: `task-${t.id}`, title, message: `${{ habit: 'Habit', med: 'Medication' }[t.kind] || 'Task'} · ${when}`, priority: 4 });
     if (ok) {
       await env.DB.prepare('INSERT INTO task_nags (key, last_at) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET last_at = excluded.last_at, count = task_nags.count + 1').bind(key, now.toISOString()).run();
       sent.push(key);
