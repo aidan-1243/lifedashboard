@@ -46,7 +46,8 @@ import * as TK from './tasks.js';
       form.insertAdjacentHTML('afterbegin', '<span class="sheet-grab" aria-hidden="true"></span><button type="button" class="sheet-x" data-sheet="close" aria-label="Close">×</button>');
     }
     // A × may be the only close control on sheets without their own Cancel button
-    sheet.querySelectorAll('.sheet-x').forEach((b) => { if (!b.onclick) b.onclick = () => sheet.close(); });
+    // Every × and Close/Cancel button closes the sheet unless the sheet set its own handler
+    sheet.querySelectorAll('.sheet-x, [data-sheet="close"]').forEach((b) => { if (!b.onclick) b.onclick = () => sheet.close(); });
     sheet.dataset.dirty = '';
     if (!sheet.open) sheet.showModal();
     // Don't pop the keyboard: focus the sheet itself, not its first text box.
