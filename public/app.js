@@ -1334,12 +1334,13 @@ import * as TK from './tasks.js';
     const d0 = parseDay(date), d1 = new Date(+d0 + DAY);
     const mmdd = date.slice(5);
     const rows = [];
-    const row = (when, title, meta, open) => rows.push(`<li class="row"><span class="when">${esc(when)}</span>${kindMark({ event: 'calendar', med: 'pill', home: 'home', trip: 'suitcase', person: /birthday/i.test(title) ? 'balloon' : 'heart', item: 'calendar' }[open.split(':')[0]] || 'calendar', { med: 'k-med', person: 'k-people', home: 'k-home', trip: 'k-travel' }[open.split(':')[0]] || '')}<button type="button" class="row-main" data-open="${esc(open)}"><div class="t">${esc(title)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>`);
+    // Rows are sorted at the end: all-day and untimed first, then by time of day
+    const row = (when, title, meta, open, at = null) => rows.push({ at, html: `<li class="row"><span class="when">${esc(when)}</span>${kindMark({ event: 'calendar', med: 'pill', home: 'home', trip: 'suitcase', person: /birthday/i.test(title) ? 'balloon' : 'heart', item: 'calendar' }[open.split(':')[0]] || 'calendar', { med: 'k-med', person: 'k-people', home: 'k-home', trip: 'k-travel' }[open.split(':')[0]] || '')}<button type="button" class="row-main" data-open="${esc(open)}"><div class="t">${esc(title)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>` });
     const evs = data.events.filter((e) => !(e.pref && e.pref.hidden) && !birthdayEventPerson(e.title, data.people) && new Date(e.start_at) < d1 && (e.end_at ? new Date(e.end_at) > d0 : new Date(e.start_at) >= d0))
       .sort((a, b) => (a.all_day - b.all_day) || (Date.parse(a.start_at) - Date.parse(b.start_at)));
-    for (const e of evs) row(e.all_day ? 'All day' : fmtShortTime(e.start_at), e.title, `Calendar${e.location ? ` · ${esc(e.location)}` : ''}`, `event:${e.id}`);
-    for (const t of data.items.filter((i) => i.status === 'open' && i.due_at && new Date(i.due_at) >= d0 && new Date(i.due_at) < d1)) row(hasTime(t.due_at) ? fmtShortTime(t.due_at) : '', t.title, itemMeta(t, { skipDue: true }), `item:${t.id}`);
-    for (const m of (data.meds || []).filter((x) => medDueOn(x, date))) { const day = slotsOn(m, date); row(fmtShortTime(slotDate(day[0]).toISOString()), m.name, `Medication · ${esc(day.map(fmtSlot).join(', '))}`, `med:${m.id}`); }
+    for (const e of evs) row(e.all_day ? 'All day' : fmtShortTime(e.start_at), e.title, `Calendar${e.location ? ` · ${esc(e.location)}` : ''}`, `event:${e.id}`, e.all_day ? null : Math.max(+d0, Date.parse(e.start_at)));
+    for (const t of data.items.filter((i) => i.status === 'open' && i.due_at && new Date(i.due_at) >= d0 && new Date(i.due_at) < d1)) row(hasTime(t.due_at) ? fmtShortTime(t.due_at) : '', t.title, itemMeta(t, { skipDue: true }), `item:${t.id}`, hasTime(t.due_at) ? Date.parse(t.due_at) : null);
+    for (const m of (data.meds || []).filter((x) => medDueOn(x, date))) { for (const slot of slotsOn(m, date)) { const [hh, mm] = slot.split(':').map(Number); const t0 = new Date(d0); t0.setHours(hh, mm, 0, 0); row(fmtSlot(slot), m.name, `Medication${m.dose ? ` · ${esc(m.dose)}` : ''}`, `med:${m.id}`, +t0); } }
     for (const h of (data.home_tasks || []).filter((t) => homeInfo(t).due === date)) row('', h.name, `Home · ${esc(h.room || '')}`, `home:${h.id}`);
     for (const p of data.people.filter((x) => x.bday_notify !== 0 && (x.birthday || '').endsWith(mmdd))) row('', `${p.name}'s birthday`, 'People', `person:${p.id}`);
     for (const pd of (data.person_dates || []).filter((x) => x.date.endsWith(mmdd))) { const p = data.people.find((x) => x.id === pd.person_id); if (p && inCircle(p)) row('', `${p.name}: ${pd.label}`, 'People', `person:${p.id}`); }
@@ -1348,7 +1349,7 @@ import * as TK from './tasks.js';
     sheet.innerHTML = `<form method="dialog">
       <h3>${esc(d0.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' }))}</h3>
       <button type="button" class="dinner-main day-dinner" data-open="meal:${date}"><span class="dicon">${mealIcon}</span><span style="min-width:0;flex:1"><span class="label">Dinner</span><strong>${ml ? esc(mealLine(ml)) : 'Not planned · tap to plan'}</strong></span></button>
-      ${rows.length ? `<div class="card"><ul class="list">${rows.join('')}</ul></div>` : '<div class="allclear">Nothing on this day yet.</div>'}
+      ${rows.length ? `<div class="card"><ul class="list">${rows.sort((x, y) => (x.at === null) !== (y.at === null) ? (x.at === null ? -1 : 1) : (x.at || 0) - (y.at || 0)).map((x) => x.html).join('')}</ul></div>` : '<div class="allclear">Nothing on this day yet.</div>'}
       <div class="actions"><button type="button" class="btn ghost" data-open="new:${date}">+ Add a task this day</button><span class="grow"></span><button type="button" class="btn dark" data-sheet="close">Done</button></div>
     </form>`;
     const form = sheet.querySelector('form');
