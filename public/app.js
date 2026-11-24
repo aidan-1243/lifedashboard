@@ -298,6 +298,8 @@ import * as TK from './tasks.js';
 
   // One icon slot per row type so This week (and the day view) scan easily.
   const KIND_ICONS = {
+    phone: '<path d="M5 4h4l2 5l-2.5 1.5a11 11 0 0 0 5 5l1.5 -2.5l5 2v4a2 2 0 0 1 -2 2a16 16 0 0 1 -15 -15a2 2 0 0 1 2 -2"/>',
+    people: '<circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v2"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M21 21v-2a4 4 0 0 0 -3 -3.85"/>',
     calendar: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/>',
     pill: '<path d="M10.5 20.5a5 5 0 0 1-7-7l10-10a5 5 0 0 1 7 7z"/><path d="M8.5 8.5l7 7"/>',
     balloon: '<path d="M12 16c3.5 0 6-3 6-7a6 6 0 0 0-12 0c0 4 2.5 7 6 7z"/><path d="M12 16l-1 2h2l-1-2M12 18c0 1.5-1 2-2 3"/>',
@@ -659,7 +661,7 @@ import * as TK from './tasks.js';
   // the check-in window (plus 3 days' grace) of the one before, and the latest one still current.
   function catchupStreak(t) {
     const every = (t.details && t.details.every) || 30;
-    const days = taskLog(t).filter((l) => l.status !== 'skipped').map((l) => l.occ.slice(0, 10)).sort().reverse();
+    const days = [...new Set(taskLog(t).filter((l) => l.status !== 'skipped').map((l) => l.occ.slice(0, 10)))].sort().reverse();
     const gap = (a, b) => Math.round((parseDay(a) - parseDay(b)) / 864e5);
     let current = 0, best = 0, run = 0;
     for (let i = 0; i < days.length; i++) { run = i && gap(days[i - 1], days[i]) <= every + 3 ? run + 1 : 1; best = Math.max(best, run); }
@@ -762,7 +764,7 @@ import * as TK from './tasks.js';
         <div class="tk-custom" data-tkshow="custom"><div class="mpresets chips-wrap"></div><div class="mpanel"></div><p class="msum"></p></div>
       </div>`}
       <div class="lbl">Reminders</div>
-      <div class="tk-group">
+      ${t.kind === 'birthday' ? `<div class="tk-group"><input type="checkbox" name="nag" hidden${t.nag ? ' checked' : ''}><a class="tk-row tk-link" href="#settings" data-sheet="close"><span class="meta">${t.nag ? 'Hourly on the day until wished' : 'No hourly reminder'} · set by circle in Settings</span><span class="meta">›</span></a></div>` : `<div class="tk-group">
         ${sw('nag', !!t.nag, 'Nag until done')}
         ${t.kind === 'task' ? `<p class="hint tk-hint" data-tkshow="nagoff">${details.silent ? 'Off: no alerts.' : 'Off: one alert when it’s due.'}</p>` : ''}
         <label class="tk-row tk-sub" data-tkshow="nag"><span>How often</span><select name="nag_mode">${opt([['hourly', 'Hourly'], ['daily', 'Daily'], ['weekly', 'Weekly']], t.nag_mode || 'hourly')}</select></label>
@@ -770,7 +772,7 @@ import * as TK from './tasks.js';
         <label class="tk-row tk-sub" data-tkshow="nagtime"><span>At</span><input type="time" name="nag_time" value="${esc(t.nag_time || '09:00')}"></label>
         ${users.length > 1 ? `<label class="tk-row" data-tkshow="nag"><span>For</span><select name="remind_to">${opt([['', 'Me'], ...users.filter((u) => !data.me || u.id !== data.me.id).map((u) => [u.id, u.name]), [0, 'Both of us']], t.remind_to ?? '')}</select></label>` : ''}
         ${users.length > 1 && t.kind !== 'habit' ? sw('shared', !!t.shared, `Shared with ${esc(others().map((u) => u.name).join(', '))}`) : ''}
-      </div>
+      </div>`}
       ${isNew ? '' : `<div class="lbl">History</div>
       <div class="tk-group">
         <div class="tk-strip" role="img" aria-label="Recent: ${recent.filter((r) => r.status === 'done' || r.status === 'partial').length} of ${recent.length} done">${recent.map((r) => `<i class="${r.status}" title="${esc(dayLabel(r.d))}${r.time ? ` ${fmtSlot(r.time)}` : ''}: ${r.status}"></i>`).join('')}</div>
@@ -1172,14 +1174,14 @@ import * as TK from './tasks.js';
       <label class="tk-row"><span>How</span><select name="talk_how"><option value="talked">Talked</option><option value="called">Called</option><option value="texted">Texted</option><option value="saw">Saw them</option></select></label>
       <label class="tk-row"><span>Who reached out</span><select name="talk_who"><option value="me">Me</option><option value="them">They did</option></select></label></div>
       <div class="btns2" style="margin-top:8px"><button type="button" class="btn dark" data-talk-log>Log it</button></div></div>`;
-  function bindEarlier(root, p, after) {
+  function bindEarlier(root, p, after, done) {
     const box = root.querySelector('.talk-earlier'), open = root.querySelector('[data-talk-earlier]');
     if (!box || !open) return;
     open.onclick = () => { box.hidden = !box.hidden; open.setAttribute('aria-expanded', String(!box.hidden)); };
     box.querySelector('[data-talk-log]').onclick = async () => {
       const d = box.querySelector('[name="talk_date"]').value;
       if (!d || d > todayYmd()) { toast('Pick a day up to today'); return; }
-      try { if (after) after(); await logTalk(p, box.querySelector('[name="talk_how"]').value, d, box.querySelector('[name="talk_who"]').value); } catch (err) { toast(err.message); }
+      try { if (after) after(); await logTalk(p, box.querySelector('[name="talk_how"]').value, d, box.querySelector('[name="talk_who"]').value); if (done) done(); } catch (err) { toast(err.message); }
     };
   }
 
@@ -1197,17 +1199,26 @@ import * as TK from './tasks.js';
   const histDay = (d) => { const x = parseDay(d); return d === todayYmd() ? 'Today' : d === TK.addDays(todayYmd(), -1) ? 'Yesterday' : x.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', ...(x.getFullYear() !== new Date().getFullYear() ? { year: 'numeric' } : {}) }); };
   function historyHtml(p, all = false) {
     const h = personHistory(p);
-    if (!h.length) return '';
+    if (!h.length) return `<div class="lbl">History</div><p class="hint">Nothing logged yet. Tap Call, Text or Saw above after you talk.</p>`;
     const yearAgo = TK.addDays(todayYmd(), -365);
     const talks = h.filter((x) => x.talk && x.d >= yearAgo);
     const me = talks.filter((x) => x.l.who === 'me').length, them = talks.filter((x) => x.l.who === 'them').length;
-    const split = me + them ? `<p class="sub hist-split">Past year: <strong>you reached out ${me}</strong> · <strong>they reached out ${them}</strong>${talks.length > me + them ? ` · ${talks.length - me - them} not marked` : ''}</p>` : '';
-    const shown = all ? h : h.slice(0, 8);
-    return `<div class="lbl" style="font-size:13px;font-weight:600;color:var(--muted)">History</div>${split}
-      <div class="card no-when"><ul class="list">${shown.map((x) => `<li class="row hist-row">
-        <${x.talk ? `button type="button" data-hist="${x.l.id}"` : 'div'} class="row-main"><div class="t">${kindMark(x.talk ? 'chat' : TASK_ICON[x.t.kind] || 'check')} ${esc(x.label)}</div>
-          <div class="meta">${esc(histDay(x.d))}${x.talk ? ` · ${x.l.who === 'them' ? 'They reached out' : x.l.who === 'me' ? 'You reached out' : 'Tap to mark who reached out'}` : ''}</div></${x.talk ? 'button' : 'div'}>
-        ${x.talk ? `<div class="hist-act" data-hist-act="${x.l.id}" hidden><button type="button" class="pbtn${x.l.who === 'me' ? ' take' : ''}" data-who="me">I did</button><button type="button" class="pbtn${x.l.who === 'them' ? ' take' : ''}" data-who="them">They did</button><button type="button" class="pbtn" data-hist-del>Remove</button></div>` : ''}</li>`).join('')}</ul></div>
+    const split = me + them ? `<div class="pv-split" role="img" aria-label="Past year: you reached out ${me} times, they reached out ${them}">
+        <div class="pv-bar"><i class="me" style="flex:${me}"></i><i class="them" style="flex:${them}"></i></div>
+        <p class="meta">↗ You ${me} · ↙ ${esc(p.name.split(' ')[0])} ${them}${talks.length > me + them ? ` · ${talks.length - me - them} not marked` : ''}</p></div>` : '';
+    const shown = all ? h : h.slice(0, 10);
+    let month = '';
+    const rows = shown.map((x) => {
+      const m = parseDay(x.d).toLocaleDateString([], { month: 'long', ...(x.d.slice(0, 4) !== todayYmd().slice(0, 4) ? { year: 'numeric' } : {}) });
+      const headRow = m !== month ? `<li class="pv-month">${esc(m)}</li>` : '';
+      month = m;
+      const arrow = x.talk ? (x.l.who === 'them' ? '<b class="dir them" aria-label="They reached out">↙</b>' : x.l.who === 'me' ? '<b class="dir me" aria-label="You reached out">↗</b>' : '<b class="dir" aria-label="Not marked">·</b>') : kindMark(TASK_ICON[x.t.kind] || 'check');
+      return `${headRow}<li class="row hist-row">
+        <${x.talk ? `button type="button" data-hist="${x.l.id}"` : 'div'} class="row-main"><div class="t">${arrow} ${esc(x.label)}</div><span class="meta">${esc(histDay(x.d))}</span></${x.talk ? 'button' : 'div'}>
+        ${x.talk ? `<div class="hist-act" data-hist-act="${x.l.id}" hidden><button type="button" class="pbtn${x.l.who === 'me' ? ' take' : ''}" data-who="me">↗ I did</button><button type="button" class="pbtn${x.l.who === 'them' ? ' take' : ''}" data-who="them">↙ They did</button><button type="button" class="pbtn" data-hist-del>Remove</button></div>` : ''}</li>`;
+    }).join('');
+    return `<div class="lbl">History</div>${split}
+      <div class="card no-when"><ul class="list">${rows}</ul></div>
       ${!all && h.length > shown.length ? `<div class="btns2 tk-focus"><button type="button" class="pbtn" data-hist-all>Show all ${h.length}</button></div>` : ''}`;
   }
   function bindHistory(root, p) {
@@ -1222,7 +1233,7 @@ import * as TK from './tasks.js';
         a.querySelectorAll('[data-who]').forEach((w) => { w.onclick = async () => { try { await api(`/api/people/${p.id}/contact/${id}`, { method: 'PATCH', body: { who: w.dataset.who } }); await refresh(); draw(all); } catch (err) { toast(err.message); } }; });
         a.querySelector('[data-hist-del]').onclick = async () => {
           if (!confirm('Remove this from the history?')) return;
-          try { await api(`/api/people/${p.id}/contact/${id}`, { method: 'DELETE' }); await refresh(); draw(all); toast('Removed'); } catch (err) { toast(err.message); }
+          try { await api(`/api/people/${p.id}/contact/${id}`, { method: 'DELETE' }); await refresh(); toast('Removed'); if (sheet.querySelector('#person-form.pv')) openPerson(p); else draw(all); } catch (err) { toast(err.message); }
         };
       });
     };
@@ -1900,6 +1911,8 @@ import * as TK from './tasks.js';
       <div class="setting">
         <strong>Notifications</strong>
         ${viewPushSetting()}
+        <label class="field"><span>Hourly birthday reminders: on the day, every hour until you mark them wished</span><select id="bday-hourly">${Object.entries({ off: 'Off', all: 'All circles', family: 'Family only', close: 'Close friends only', close_family: 'Close friends and family' }).map(([k, v]) => `<option value="${k}"${(s.bday_hourly || 'close_family') === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
+        <p class="hint">Other birthdays still show on Today and in your briefing. “All circles” includes people with no circle set.</p>
         <div class="btns"><button type="button" class="btn ghost" data-act="test-push">Send a test</button>
         <button type="button" class="btn ghost" data-act="briefing">Send briefing now</button></div>
       </div>
@@ -2649,39 +2662,41 @@ import * as TK from './tasks.js';
     showSheet();
   }
 
-  function personExtras(p) {
+  function giftsHtml(p) {
     const gifts = (data.gifts || []).filter((g) => g.person_id === p.id);
-    const dates = (data.person_dates || []).filter((d) => d.person_id === p.id);
     const giftRows = gifts.map((g) => `<li class="row"><div class="row-main"><div class="t${g.status === 'given' ? ' done-t' : ''}">${esc(g.idea)}</div>
       <div class="meta">${g.status === 'idea' ? 'Idea' : g.status === 'bought' ? 'Bought' : 'Given'}${g.link ? ` · <a href="${esc(g.link)}" target="_blank" rel="noopener">link</a>` : ''}</div></div>
       ${g.status === 'idea' ? `<button type="button" class="pbtn" data-gift="bought" data-id="${g.id}">Bought</button>` : g.status === 'bought' ? `<button type="button" class="pbtn" data-gift="given" data-id="${g.id}">Given</button>` : ''}
       <button type="button" class="pbtn icon" data-gift="del" data-id="${g.id}" aria-label="Remove ${esc(g.idea)}">×</button></li>`).join('');
+    return `<div class="field"><span>You'll get a nudge 2 weeks before their birthday</span>
+        ${giftRows ? `<div class="card"><ul class="list">${giftRows}</ul></div>` : ''}
+        <div class="addrow"><input id="gift-new" placeholder="Idea (paste a link too)" maxlength="300"><button type="button" class="pbtn" data-gift="add">Add</button></div></div>`;
+  }
+  function datesHtml(p) {
+    const dates = (data.person_dates || []).filter((d) => d.person_id === p.id);
     const dateRows = dates.map((d) => { const b = birthdayIn(d.date);
-      return `<li class="row"><div class="row-main"><div class="t">${esc(d.label)}</div><div class="meta">${b ? esc(b.date.toLocaleDateString([], { month: 'long', day: 'numeric' })) + ` · in ${b.days} days` : esc(d.date)}${d.remind ? ' · reminding you' : ''}</div></div>
+      return `<li class="row"><div class="row-main"><div class="t">${esc(d.label)}</div><div class="meta">${b ? esc(b.date.toLocaleDateString([], { month: 'long', day: 'numeric' })) : esc(d.date)}${d.remind ? ' · reminding you' : ''}</div></div>
       <button type="button" class="pbtn" data-pdate="remind" data-id="${d.id}" data-v="${d.remind ? 0 : 1}">${d.remind ? 'Mute' : 'Remind'}</button>
       <button type="button" class="pbtn icon" data-pdate="del" data-id="${d.id}" aria-label="Remove ${esc(d.label)}">×</button></li>`; }).join('');
-    return `<div class="field"><span>Gift ideas · you'll get a nudge 2 weeks before their birthday</span>
-        ${giftRows ? `<div class="card"><ul class="list">${giftRows}</ul></div>` : ''}
-        <div class="addrow"><input id="gift-new" placeholder="Idea (paste a link too)" maxlength="300"><button type="button" class="pbtn" data-gift="add">Add</button></div></div>
-      <div class="field"><span>Important dates</span>
+    return `<div class="lbl">Important dates</div>
         ${dateRows ? `<div class="card"><ul class="list">${dateRows}</ul></div>` : ''}
         <div class="addrow"><input id="pd-label" placeholder="Anniversary" maxlength="60" style="flex:1.2"><input id="pd-date" type="date" aria-label="Date" style="flex:1"></div>
-        <div class="addrow"><label class="inline" style="flex:1"><input type="checkbox" id="pd-remind" checked> Remind me on the day</label><button type="button" class="pbtn" data-pdate="add">Add date</button></div></div>`;
+        <div class="addrow"><label class="inline" style="flex:1"><input type="checkbox" id="pd-remind" checked> Remind me on the day</label><button type="button" class="pbtn" data-pdate="add">Add date</button></div>`;
   }
 
   // Gift ideas and important dates save immediately and redraw just their own
   // section, so the sheet stays put and anything you've typed above is kept.
-  function bindPersonExtras(form, p) {
+  function bindPersonExtras(form, p, render) {
     const box = form.querySelector('#p-extras');
     if (!box) return;
     const redraw = async () => {
       await refresh();
       const fresh = data.people.find((x) => x.id === p.id) || p;
-      box.innerHTML = personExtras(fresh);
-      bindPersonExtras(form, fresh);
+      box.innerHTML = render(fresh);
+      bindPersonExtras(form, fresh, render);
     };
     const addGift = async () => {
-      const inp = box.querySelector('#gift-new'); const v = inp.value.trim(); if (!v) return;
+      const inp = box.querySelector('#gift-new'); if (!inp) return; const v = inp.value.trim(); if (!v) return;
       const link = (v.match(/https?:\/\/\S+/) || [])[0] || null;
       await api('/api/gifts', { body: { person_id: p.id, idea: v.replace(link || '', '').trim() || v, link } });
       await redraw(); toast('Gift idea added');
@@ -2716,83 +2731,134 @@ import * as TK from './tasks.js';
     }; });
   }
 
+  // ---------- person page ----------
+  // The page is for keeping in touch: quick facts, logging a talk, what's coming up and the
+  // history. Details (name, birthday, check-in, circle, dates, notes) live behind Edit.
+  const TALK_VERB = { called: ['I called', 'called me'], texted: ['I texted', 'texted me'], saw: ['I set up seeing', 'set up seeing me'] };
+  function relDays(n) { return n <= 0 ? 'Today' : n === 1 ? 'Yesterday' : n < 14 ? `${n} days ago` : n < 60 ? `${Math.round(n / 7)} weeks ago` : `${Math.round(n / 30)} months ago`; }
+
   function openPerson(p) {
+    if (!p.id) return openPersonEdit(p);
+    p = data.people.find((x) => x.id === p.id) || p;
+    const first = p.name.split(' ')[0];
     const b = birthdayIn(p.birthday);
-    const opt = Object.entries(CHECKINS).map(([k, v]) => `<option value="${k}"${String(p.checkin_days ?? '') === k ? ' selected' : ''}>${v}</option>`).join('');
-    sheet.innerHTML = `<form method="dialog" id="person-form">
-      ${p.id ? `<div style="display:flex;gap:14px;align-items:center">
-        <span class="avatar lg a-people">${esc(initials(p.name))}</span>
-        <div><h3>${esc(p.name)}</h3><p class="sub" style="margin:2px 0 0">${[
-          b ? `Birthday ${b.date.toLocaleDateString([], { month: 'long', day: 'numeric' })}${b.days === 0 ? ' (today)' : ` (in ${b.days} days)`}` : '',
-          p.last_contact_at ? (() => { const n = daysBetween(new Date(p.last_contact_at), new Date()); return `last ${esc(p.last_contact_how || 'contact')} ${n <= 0 ? 'today' : n === 1 ? 'yesterday' : `${n} days ago`}`; })() : 'no contact logged',
-        ].filter(Boolean).join(' · ')}</p></div></div>
-      <div class="who-pick" role="radiogroup" aria-label="Who reached out"><span class="sub">Who reached out?</span>
-        <button type="button" class="chip-btn" role="radio" aria-checked="true" data-whopick="me">Me</button>
-        <button type="button" class="chip-btn" role="radio" aria-checked="false" data-whopick="them">They did</button></div>
-      <div class="btns">
-        <button type="button" class="pbtn" data-log="called">Called ✓</button>
-        <button type="button" class="pbtn" data-log="texted">Texted ✓</button>
-        <button type="button" class="pbtn" data-log="saw">Saw them ✓</button>
-        <button type="button" class="pbtn" data-talk-earlier aria-expanded="false">Earlier day…</button>
-      </div>${earlierPicker()}` : '<h3>New person</h3>'}
-      <label class="field"><span>Name</span><input name="name" value="${esc(p.name)}" required></label>
-      <div class="two">
-        <label class="field"><span>Birthday</span><input name="birthday" value="${esc(p.birthday)}" placeholder="YYYY-MM-DD or --MM-DD"></label>
-        <label class="field"><span>Check in</span><select name="checkin_days">${opt}</select></label>
+    const cu = (data.tasks || []).find((t) => t.kind === 'catchup' && !t.archived && t.details && t.details.person_id === p.id);
+    const since = p.last_contact_at ? daysBetween(new Date(p.last_contact_at), new Date()) : null;
+    const yearTalks = personHistory(p).filter((x) => x.talk && x.d >= TK.addDays(todayYmd(), -365)).length;
+    const facts = [
+      ['Last talk', since === null ? 'Not yet' : relDays(since)],
+      p.checkin_days && cu && cu.date ? ['Next catch-up', cu.date <= todayYmd() ? 'Now' : parseDay(cu.date).toLocaleDateString([], { month: 'short', day: 'numeric' })] : ['Check in', 'Not tracked'],
+      p.checkin_days && cu ? ['Streak', `${streakOf(cu).current} in a row`] : ['Past year', `${yearTalks} talk${yearTalks === 1 ? '' : 's'}`],
+    ];
+    // Coming up: birthday, important dates (each opens its task), gift ideas for close people
+    const ptasks = (data.tasks || []).filter((t) => (t.kind === 'birthday' || t.kind === 'pdate') && !t.archived && t.details && t.details.person_id === p.id)
+      .map((t) => ({ t, next: TK.nextDate(t, todayYmd()) })).filter((x) => x.next).sort((x, y) => x.next.localeCompare(y.next));
+    const upRows = ptasks.map(({ t, next }) => {
+      const n = daysBetween(parseDay(todayYmd()), parseDay(next));
+      const label = t.kind === 'birthday' ? `Birthday${b && b.turns ? ` · turns ${b.turns}` : ''}` : (t.details.label || t.title);
+      return `<button type="button" class="pv-row" data-ptask="${t.id}"><span>${kindMark(t.kind === 'birthday' ? 'balloon' : 'heart')} ${esc(label)}</span><span class="meta">${n === 0 ? 'Today' : `${esc(parseDay(next).toLocaleDateString([], { month: 'short', day: 'numeric' }))} · ${n} day${n === 1 ? '' : 's'}`}</span></button>`;
+    }).join('');
+    const bdayRow = b && !ptasks.some((x) => x.t.kind === 'birthday') ? `<div class="pv-row"><span>${kindMark('balloon')} Birthday${b.turns ? ` · turns ${b.turns}` : ''}</span><span class="meta">${b.days === 0 ? 'Today' : `${esc(b.date.toLocaleDateString([], { month: 'short', day: 'numeric' }))} · ${b.days} day${b.days === 1 ? '' : 's'}`}</span></div>` : '';
+    const gifts = inCircle(p) ? (data.gifts || []).filter((g) => g.person_id === p.id && g.status !== 'given') : null;
+    sheet.innerHTML = `<form method="dialog" id="person-form" class="pv">
+      <div class="pv-head"><span class="avatar lg a-people">${esc(initials(p.name))}</span>
+        <div class="pv-name"><h3>${esc(p.name)}</h3><p class="sub">${esc([CIRCLES[p.circle], p.checkin_days ? CHECKINS[p.checkin_days] || `Every ${p.checkin_days} days` : ''].filter(Boolean).join(' · ') || 'No circle set')}</p></div>
+        <button type="button" class="pbtn" data-pedit>Edit</button></div>
+      <div class="pv-facts">${facts.map(([k, v]) => `<div><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}</div>
+      <div class="lbl">Log a talk</div>
+      <div class="pv-log">
+        <button type="button" class="pv-act" data-talk="called">${kindMark('phone')}<span>Call</span></button>
+        <button type="button" class="pv-act" data-talk="texted">${kindMark('chat')}<span>Text</span></button>
+        <button type="button" class="pv-act" data-talk="saw">${kindMark('people')}<span>Saw</span></button>
+        <button type="button" class="pv-act" data-talk-earlier aria-expanded="false">${kindMark('calendar')}<span>Earlier</span></button>
       </div>
-      <div class="two">
-        <label class="field"><span>Circle</span><select name="circle"><option value="">—</option>${Object.entries(CIRCLES).map(([k, v]) => `<option value="${k}"${p.circle === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
-      </div>
-      ${p.id ? `<div id="p-extras"${inCircle(p) ? '' : ' hidden'}>${personExtras(p)}</div>
-      <p class="sub" id="p-extras-hint" style="margin:0"${inCircle(p) ? ' hidden' : ''}>Set them as Family or Close friend to keep gift ideas and important dates.</p>` : ''}
-      ${p.id ? (() => { const ts = (data.tasks || []).filter((t) => PEOPLE_KINDS.includes(t.kind) && t.date && !t.archived && t.details && t.details.person_id === p.id);
-        return ts.length ? `<div class="lbl" style="font-size:13px;font-weight:600;color:var(--muted)">Reminders and streaks</div><div class="card no-when"><ul class="list">${ts.map((t) => `<li class="row"><button type="button" class="row-main" data-ptask="${t.id}"><div class="t">${esc(t.kind === 'birthday' ? 'Birthday' : t.kind === 'catchup' ? 'Catch up' : (t.details.label || t.title))}</div><div class="meta">${t.kind === 'catchup' ? `every ${t.details.every} days · next ${esc(dayLabel(t.date))}` : esc(parseDay(t.date).toLocaleDateString([], { month: 'long', day: 'numeric' }))}${t.nag ? ` · ${esc(TK.describeNag(t).toLowerCase())}` : ''}</div></button>${flame(streakOf(t).current)}</li>`).join('')}</ul></div>` : ''; })() : ''}
-      ${p.id ? `<div class="p-history">${historyHtml(p)}</div>` : ''}
-      <label class="inline"><input type="checkbox" name="bday_notify"${p.bday_notify !== 0 ? ' checked' : ''}> Show their birthday on Today and in my briefing</label>
-      <label class="inline"><input type="checkbox" name="bday_remind"${p.bday_remind ? ' checked' : ''}> Remind me hourly on their birthday until I've wished them</label>
-      <label class="field"><span>Notes</span><textarea name="notes">${esc(p.notes)}</textarea></label>
-      <div class="actions">
-        <span class="grow"></span>
-        <button type="button" class="btn ghost" data-sheet="close">Close</button>
-        <button type="submit" class="btn dark">Save</button>
-      </div>
+      <div class="pv-menu" hidden></div>
+      <p class="hint pv-hint">Tap logs it as you reaching out. Press and hold if ${esc(first)} reached out.</p>
+      ${earlierPicker()}
+      ${upRows || bdayRow || gifts ? `<div class="lbl">Coming up</div><div class="pv-list">${bdayRow}${upRows}
+        ${gifts ? `<button type="button" class="pv-row" data-gifts aria-expanded="false"><span>${kindMark('gift')} Gift ideas${gifts.length ? ` · ${gifts.length}` : ''}</span><span class="meta">›</span></button>` : ''}</div>
+        ${gifts ? `<div id="p-extras" hidden>${giftsHtml(p)}</div>` : ''}` : ''}
+      <div class="p-history">${historyHtml(p)}</div>
+      ${p.notes ? `<div class="lbl">Notes</div><p class="pv-notes">${esc(p.notes)}</p>` : ''}
+      <div class="actions"><span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Close</button></div>
     </form>`;
     const form = sheet.querySelector('form');
-    form.querySelectorAll('[data-ptask]').forEach((b) => { b.onclick = () => { const t = taskById(+b.dataset.ptask); if (t) openTask(t); }; });
+    form.onsubmit = (e) => e.preventDefault();
+    form.querySelector('[data-pedit]').onclick = () => openPersonEdit(p);
+    form.querySelectorAll('[data-ptask]').forEach((x) => { x.onclick = () => { const t = taskById(+x.dataset.ptask); if (t) openTask(t); }; });
+    const gb = form.querySelector('[data-gifts]');
+    if (gb) gb.onclick = () => { const box = form.querySelector('#p-extras'); box.hidden = !box.hidden; gb.setAttribute('aria-expanded', String(!box.hidden)); };
+    if (gifts) bindPersonExtras(form, p, giftsHtml);
+    const reopen = () => { if (sheet.open && sheet.querySelector('#person-form.pv')) openPerson(p); };
+    const log = async (how, who, date = null) => { try { await logTalk(p, how, date, who); reopen(); } catch (err) { toast(err.message); } };
+    // Tap = you reached out. Press and hold = a small menu: they reached out, or an earlier day.
+    const menu = form.querySelector('.pv-menu');
+    form.querySelectorAll('[data-talk]').forEach((btn) => {
+      const how = btn.dataset.talk;
+      let timer = null, held = false;
+      const showMenu = () => {
+        held = true;
+        if (navigator.vibrate) navigator.vibrate(10);
+        const [mine, theirs] = TALK_VERB[how];
+        menu.innerHTML = `<button type="button" data-m="me">↗ ${esc(mine)} ${esc(first)}</button><button type="button" data-m="them">↙ ${esc(first)} ${esc(theirs)}</button><button type="button" data-m="earlier">${kindMark('calendar')} On an earlier day…</button>`;
+        menu.hidden = false;
+        menu.querySelectorAll('[data-m]').forEach((m) => { m.onclick = () => {
+          menu.hidden = true;
+          if (m.dataset.m === 'earlier') { const box = form.querySelector('.talk-earlier'); box.hidden = false; box.querySelector('[name="talk_how"]').value = how; box.scrollIntoView({ block: 'nearest' }); return; }
+          log(how, m.dataset.m);
+        }; });
+      };
+      btn.addEventListener('pointerdown', () => { held = false; clearTimeout(timer); timer = setTimeout(showMenu, 450); });
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => btn.addEventListener(ev, () => clearTimeout(timer)));
+      btn.addEventListener('contextmenu', (e) => e.preventDefault());
+      btn.addEventListener('click', () => { if (held) { held = false; return; } menu.hidden = true; log(how, 'me'); });
+    });
+    bindEarlier(form, p, null, reopen);
+    bindHistory(form, p);
+    showSheet();
+  }
+
+  function openPersonEdit(p) {
+    const isNew = !p.id;
+    const opt = Object.entries(CHECKINS).map(([k, v]) => `<option value="${k}"${String(p.checkin_days ?? '') === k ? ' selected' : ''}>${v}</option>`).join('');
+    sheet.innerHTML = `<form method="dialog" id="person-edit" class="tk-sheet">
+      <h3>${isNew ? 'New person' : `Edit ${esc(p.name.split(' ')[0])}`}</h3>
+      <div class="tk-group">
+        <label class="tk-row tk-in"><span>Name</span><input name="name" value="${esc(p.name || '')}" required maxlength="120"></label>
+        <label class="tk-row tk-in"><span>Birthday</span><input name="birthday" value="${esc(p.birthday || '')}" placeholder="1990-12-01 or --12-01"></label>
+        <label class="tk-row"><span>Check in</span><select name="checkin_days">${opt}</select></label>
+        <label class="tk-row"><span>Circle</span><select name="circle"><option value="">None</option>${Object.entries(CIRCLES).map(([k, v]) => `<option value="${k}"${p.circle === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
+      </div>
+      <div class="lbl">Birthday</div>
+      <div class="tk-group">
+        <label class="tk-row"><span>Show on Today and in my briefing</span><input type="checkbox" class="tk-switch" name="bday_notify"${p.bday_notify !== 0 ? ' checked' : ''}></label>
+      </div>
+      ${isNew ? '' : `<div id="p-extras">${datesHtml(p)}</div>`}
+      <div class="lbl">Notes</div>
+      <div class="tk-group"><textarea name="notes" class="tk-notes" rows="3" maxlength="2000" placeholder="Kids' names, what they're up to">${esc(p.notes || '')}</textarea></div>
+      ${isNew ? '' : '<div class="btns2 tk-focus"><button type="button" class="btn danger" data-pdel>Delete person</button></div>'}
+      <div class="actions"><span class="grow"></span><button type="button" class="btn ghost" data-pcancel>Cancel</button><button type="submit" class="btn dark">Save</button></div>
+    </form>`;
+    const form = sheet.querySelector('form');
+    const back = () => (isNew ? sheet.close() : openPerson(data.people.find((x) => x.id === p.id) || p));
+    form.querySelector('[data-pcancel]').onclick = back;
     form.onsubmit = async (e) => {
       e.preventDefault();
       const f = new FormData(form);
-      const body = { name: f.get('name').trim(), birthday: f.get('birthday').trim() || null, checkin_days: f.get('checkin_days') ? +f.get('checkin_days') : null, notes: f.get('notes').trim() || null, bday_remind: f.get('bday_remind') ? 1 : 0, bday_notify: f.get('bday_notify') ? 1 : 0, circle: f.get('circle') || null };
+      const body = { name: f.get('name').trim(), birthday: f.get('birthday').trim() || null, checkin_days: f.get('checkin_days') ? +f.get('checkin_days') : null, notes: f.get('notes').trim() || null, bday_notify: f.get('bday_notify') ? 1 : 0, circle: f.get('circle') || null };
       try {
-        if (p.id) await api(`/api/people/${p.id}`, { method: 'PATCH', body });
-        else await api('/api/people', { body });
-        sheet.close();
+        const r = isNew ? await api('/api/people', { body }) : await api(`/api/people/${p.id}`, { method: 'PATCH', body });
         await refresh();
         toast('Saved');
+        openPerson(data.people.find((x) => x.id === (isNew ? r.id : p.id)) || r);
       } catch (err) { toast(err.message); }
     };
-    form.querySelector('[data-sheet="close"]').onclick = () => sheet.close();
-    // Choosing Family / Close friend shows gift ideas and dates right here.
-    form.circle.onchange = () => {
-      const on = form.circle.value === 'family' || form.circle.value === 'close';
-      const ex = form.querySelector('#p-extras'), hint = form.querySelector('#p-extras-hint');
-      if (ex) ex.hidden = !on;
-      if (hint) hint.hidden = on;
+    const del = form.querySelector('[data-pdel]');
+    if (del) del.onclick = async () => {
+      if (!confirm(`Delete ${p.name}? This can’t be undone.`)) return;
+      try { await api(`/api/people/${p.id}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Deleted'); } catch (err) { toast(err.message); }
     };
-    if (p.id) bindPersonExtras(form, p);
-    form.querySelectorAll('[data-log]').forEach((btn) => {
-      btn.onclick = async () => {
-        sheet.close();
-        await logTalk(p, btn.dataset.log, null, who);
-      };
-    });
-    let who = 'me';
-    form.querySelectorAll('[data-whopick]').forEach((b) => { b.onclick = () => {
-      who = b.dataset.whopick;
-      form.querySelectorAll('[data-whopick]').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
-      const sel = form.querySelector('[name="talk_who"]'); if (sel) sel.value = who;
-    }; });
-    if (p.id) { bindEarlier(form, p, () => sheet.close()); bindHistory(form, p); }
+    if (!isNew) bindPersonExtras(form, p, datesHtml);
     showSheet();
   }
 
@@ -2858,6 +2924,10 @@ import * as TK from './tasks.js';
   });
 
   app.addEventListener('change', async (e) => {
+    if (e.target.id === 'bday-hourly') {
+      try { await api('/api/settings', { method: 'PATCH', body: { bday_hourly: e.target.value } }); await refresh(); toast('Birthday reminders updated'); } catch (err) { toast(err.message); }
+      return;
+    }
     if (e.target.id === 'hide-bdays') {
       await api('/api/settings', { method: 'PATCH', body: { hide_cal_birthdays: e.target.checked ? '1' : '0' } });
       await refresh();

@@ -9,7 +9,7 @@ import * as RW from '../public/rewards.js';
 import * as TK from '../public/tasks.js';
 
 const ITEM_FIELDS = ['title', 'notes', 'area', 'kind', 'due_at', 'nag', 'repeat_days', 'top3', 'person_id', 'status', 'snooze_until', 'shared', 'trip_id'];
-const PERSON_FIELDS = ['name', 'birthday', 'phone', 'email', 'notes', 'checkin_days', 'bday_remind', 'bday_notify', 'circle'];
+const PERSON_FIELDS = ['name', 'birthday', 'phone', 'email', 'notes', 'checkin_days', 'bday_notify', 'circle'];
 
 // Your settings for synced calendar events live in event_prefs, keyed by the
 // event's title (all events with that title) or title + start time (just that
@@ -238,7 +238,7 @@ function daysUntilBirthday(bday, today) {
 // Settings are per person, except the household ones below. User 1's are stored under
 // plain keys (as before); everyone else's as "u<id>:<key>".
 const HOUSEHOLD_SETTINGS = new Set(['weather_lat', 'weather_lon', 'weather_points', 'weather_cache', 'last_push_error', 'shared_calendar']);
-const DEFAULT_SETTINGS = { quiet_start: '22', quiet_end: '7', briefing_hour: '7', last_briefing: '', events_synced_at: '', shared_calendar: 'Aidan & Logan' };
+const DEFAULT_SETTINGS = { quiet_start: '22', quiet_end: '7', briefing_hour: '7', bday_hourly: 'close_family', last_briefing: '', events_synced_at: '', shared_calendar: 'Aidan & Logan' };
 
 // Your events plus the household's shared-calendar events from the other person. If you both
 // sync the shared calendar, each event is kept once (yours wins).
@@ -515,9 +515,15 @@ async function handleApi(req, env, url, ctx, uid) {
     if (date < new Date(Date.now() - 366 * 864e5).toISOString().slice(0, 10)) return json({ error: 'Pick a day within the last year' }, 400);
     const at = date === today ? nowIso() : `${date}T18:00:00.000Z`; // midday local, so the day stays put
     const tid = await catchupTaskId(env, uid, +m[1]);
+    // Each talk is its own entry (a text from you and a call from them on one day are two).
+    // occ = "YYYY-MM-DD HH:MM" local; earlier days get midday, plus a minute per extra entry that day.
+    const lp = localParts(new Date(), tz);
+    let hm = date === today ? `${String(lp.h).padStart(2, '0')}:${String(lp.min).padStart(2, '0')}` : '12:00';
+    const taken = new Set((await env.DB.prepare("SELECT occ FROM task_log WHERE task_id = ? AND occ LIKE ?").bind(tid, `${date}%`).all()).results.map((r) => r.occ));
+    for (let i = 0; taken.has(`${date} ${hm}`) && i < 600; i++) { const [h, mi] = hm.split(':').map(Number); const t = Math.min(23 * 60 + 59, h * 60 + mi + 1); hm = `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`; }
     const log = await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, at, by_user, how, who) VALUES (?, ?, 'done', ?, ?, ?, ?)
       ON CONFLICT(task_id, occ) DO UPDATE SET status = 'done', at = excluded.at, by_user = excluded.by_user, how = excluded.how, who = excluded.who RETURNING id`)
-      .bind(tid, date, at, uid, talkHow(body && body.how), talkWho(body && body.who)).first();
+      .bind(tid, `${date} ${hm}`, at, uid, talkHow(body && body.how), talkWho(body && body.who)).first();
     const r = await afterTalk(env, uid, +m[1]);
     return json({ ...r, log_id: log.id, date });
   }
@@ -722,6 +728,8 @@ async function handleApi(req, env, url, ctx, uid) {
   // Settings and testing
   if (path === '/api/settings' && method === 'PATCH') {
     for (const k of ['quiet_start', 'quiet_end', 'briefing_hour', 'name', 'default_travel', 'hide_cal_birthdays', 'wrap_hour', 'meal_plan_hour', 'palette']) if (k in body) await setSetting(env, k, String(body[k]).slice(0, 60), uid);
+    // Hourly birthday reminders, by circle (replaces the per-person switch)
+    if ('bday_hourly' in body && Object.hasOwn(BDAY_HOURLY, body.bday_hourly)) { await setSetting(env, 'bday_hourly', body.bday_hourly, uid); await syncPeopleTasks(env, uid); }
     if ('shared_calendar' in body) { await setSetting(env, 'shared_calendar', String(body.shared_calendar).slice(0, 500), uid); await reshareEvents(env); }
     // Weather location: rounded to about 1 km, used only to ask the National Weather Service for a forecast.
     if ('weather_lat' in body && 'weather_lon' in body) {
@@ -756,7 +764,6 @@ async function handleApi(req, env, url, ctx, uid) {
       if (row && row.kind === 'task' && ['date', 'time', 'repeat', 'custom', 'nag', 'nag_mode', 'nag_time', 'nag_dow'].some((k) => k in fields && String(fields[k] ?? '') !== String(before[k] ?? ''))) await clearTodoNags(env, row.id);
       if ('nag' in (body || {}) && row && row.legacy_ref) {
         const [kind, ref] = row.legacy_ref.split(':');
-        if (kind === 'bday') await env.DB.prepare('UPDATE people SET bday_remind = ? WHERE id = ?').bind(row.nag, +ref).run();
         if (kind === 'pdate') await env.DB.prepare('UPDATE person_dates SET remind = ? WHERE id = ?').bind(row.nag, +ref).run();
       }
       return json(taskOut(row));
@@ -1367,8 +1374,14 @@ async function afterTalk(env, uid, personId) {
   await syncPeopleTasks(env, uid, +personId);
   return r;
 }
+// Which circles get hourly reminders on their birthday until you mark them wished.
+// "all" includes people with no circle set.
+const BDAY_HOURLY = { off: [], all: null, family: ['family'], close: ['close'], close_family: ['close', 'family'] };
 async function syncPeopleTasks(env, uid, personId = null) {
   const tz = env.TZ || 'America/Chicago';
+  const mode = (await getSettings(env, uid)).bday_hourly;
+  const hourly = Object.hasOwn(BDAY_HOURLY, mode) ? BDAY_HOURLY[mode] : BDAY_HOURLY.close_family;
+  const nagFor = (p) => (hourly === null || hourly.includes(p.circle) ? 1 : 0);
   const today = localParts(new Date(), tz).date;
   const people = (await env.DB.prepare(`SELECT * FROM people WHERE user_id = ?${personId ? ' AND id = ?' : ''}`).bind(...(personId ? [uid, personId] : [uid])).all()).results;
   const dates = people.length ? (await env.DB.prepare('SELECT * FROM person_dates WHERE person_id IN (SELECT value FROM json_each(?))').bind(JSON.stringify(people.map((p) => p.id))).all()).results : [];
@@ -1376,7 +1389,7 @@ async function syncPeopleTasks(env, uid, personId = null) {
   for (const p of people) {
     const first = String(p.name).split(' ')[0];
     const bd = yearlyDate(p.birthday);
-    if (bd && p.bday_notify !== 0) want.push({ ref: `bday:${p.id}`, kind: 'birthday', title: `${p.name}'s birthday`, date: bd, repeat: 'yearly', nag: p.bday_remind ? 1 : 0, details: { person_id: p.id, first } });
+    if (bd && p.bday_notify !== 0) want.push({ ref: `bday:${p.id}`, kind: 'birthday', title: `${p.name}'s birthday`, date: bd, repeat: 'yearly', nag: nagFor(p), details: { person_id: p.id, first } });
     for (const d of dates.filter((x) => x.person_id === p.id)) {
       const dd = yearlyDate(d.date);
       if (dd) want.push({ ref: `pdate:${d.id}`, kind: 'pdate', title: `${first}: ${d.label}`, date: dd, repeat: 'yearly', nag: d.remind ? 1 : 0, details: { person_id: p.id, first, label: d.label } });
