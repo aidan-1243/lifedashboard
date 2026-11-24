@@ -9,7 +9,7 @@ import * as RW from '../public/rewards.js';
 import * as TK from '../public/tasks.js';
 
 const ITEM_FIELDS = ['title', 'notes', 'area', 'kind', 'due_at', 'nag', 'repeat_days', 'top3', 'person_id', 'status', 'snooze_until', 'shared', 'trip_id'];
-const PERSON_FIELDS = ['name', 'birthday', 'phone', 'email', 'notes', 'checkin_days', 'last_contact_at', 'last_contact_how', 'bday_remind', 'bday_notify', 'circle'];
+const PERSON_FIELDS = ['name', 'birthday', 'phone', 'email', 'notes', 'checkin_days', 'bday_remind', 'bday_notify', 'circle'];
 
 // Your settings for synced calendar events live in event_prefs, keyed by the
 // event's title (all events with that title) or title + start time (just that
@@ -506,40 +506,33 @@ async function handleApi(req, env, url, ctx, uid) {
     }
   }
   if ((m = /^\/api\/people\/(\d+)\/contact$/.exec(path)) && method === 'POST') {
-    // A talk today, or on an earlier day you forgot to log (up to a year back; `date` is YYYY-MM-DD local).
+    // A talk is a "done" on the person's catch-up task: today, or an earlier day you forgot to log
+    // (up to a year back). `how` = talked / called / texted / saw; `who` = who reached out (me / them).
     const tz = env.TZ || 'America/Chicago';
     const today = localParts(new Date(), tz).date;
     const date = body && /^\d{4}-\d{2}-\d{2}$/.test(body.date || '') ? body.date : today;
     if (date > today) return json({ error: 'That day hasn’t happened yet' }, 400);
     if (date < new Date(Date.now() - 366 * 864e5).toISOString().slice(0, 10)) return json({ error: 'Pick a day within the last year' }, 400);
     const at = date === today ? nowIso() : `${date}T18:00:00.000Z`; // midday local, so the day stays put
-    const how = String((body && body.how) || 'talked').slice(0, 20);
-    const log = await env.DB.prepare('INSERT INTO contact_log (person_id, how, at) VALUES (?, ?, ?) RETURNING id').bind(+m[1], how, at).first();
-    // Only a newer talk moves "last contact" (and so the next catch-up date)
-    const prev = await env.DB.prepare('SELECT * FROM people WHERE id = ?').bind(+m[1]).first();
-    const r = !prev.last_contact_at || at > prev.last_contact_at ? await updateRow(env, 'people', +m[1], { last_contact_at: at, last_contact_how: how }) : prev;
-    // The catch-up task: log that day done, then move it to the next check-in date
-    const t = await env.DB.prepare("SELECT id FROM tasks WHERE legacy_ref = ?").bind(`catchup:${+m[1]}`).first();
-    if (t) await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, at, by_user) VALUES (?, ?, 'done', ?, ?)
-      ON CONFLICT(task_id, occ) DO UPDATE SET status = 'done', at = excluded.at`).bind(t.id, date, at, uid).run();
-    await syncPeopleTasks(env, uid, +m[1]);
+    const tid = await catchupTaskId(env, uid, +m[1]);
+    const log = await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, at, by_user, how, who) VALUES (?, ?, 'done', ?, ?, ?, ?)
+      ON CONFLICT(task_id, occ) DO UPDATE SET status = 'done', at = excluded.at, by_user = excluded.by_user, how = excluded.how, who = excluded.who RETURNING id`)
+      .bind(tid, date, at, uid, talkHow(body && body.how), talkWho(body && body.who)).first();
+    const r = await afterTalk(env, uid, +m[1]);
     return json({ ...r, log_id: log.id, date });
   }
-  if ((m = /^\/api\/people\/(\d+)\/contact\/(\d+)$/.exec(path)) && method === 'DELETE') {
-    // Undo a logged talk: remove it, recompute "last contact", and drop that day from the catch-up
-    // history unless another talk is logged the same day.
-    const tz = env.TZ || 'America/Chicago';
-    const row = await env.DB.prepare('SELECT * FROM contact_log WHERE id = ? AND person_id = ?').bind(+m[2], +m[1]).first();
-    if (!row) return json({ ok: true });
-    await env.DB.prepare('DELETE FROM contact_log WHERE id = ?').bind(row.id).run();
-    const day = localParts(new Date(row.at), tz).date;
-    const rest = (await env.DB.prepare('SELECT how, at FROM contact_log WHERE person_id = ? ORDER BY at DESC').bind(+m[1]).all()).results;
-    await updateRow(env, 'people', +m[1], { last_contact_at: rest[0] ? rest[0].at : null, last_contact_how: rest[0] ? rest[0].how : null });
-    if (!rest.some((x) => localParts(new Date(x.at), tz).date === day)) {
-      await env.DB.prepare("DELETE FROM task_log WHERE occ = ? AND task_id = (SELECT id FROM tasks WHERE legacy_ref = ?)").bind(day, `catchup:${+m[1]}`).run();
+  if ((m = /^\/api\/people\/(\d+)\/contact\/(\d+)$/.exec(path)) && (method === 'DELETE' || method === 'PATCH')) {
+    // Change who reached out / how, or remove a talk (undo). Only talks on this person's catch-up.
+    const tid = await catchupTaskId(env, uid, +m[1]);
+    if (method === 'DELETE') await env.DB.prepare('DELETE FROM task_log WHERE id = ? AND task_id = ?').bind(+m[2], tid).run();
+    else {
+      const set = {};
+      if (body && 'who' in body) set.who = talkWho(body.who);
+      if (body && 'how' in body) set.how = talkHow(body.how);
+      const keys = Object.keys(set);
+      if (keys.length) await env.DB.prepare(`UPDATE task_log SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND task_id = ?`).bind(...keys.map((k) => set[k]), +m[2], tid).run();
     }
-    await syncPeopleTasks(env, uid, +m[1]);
-    return json({ ok: true });
+    return json(await afterTalk(env, uid, +m[1]));
   }
 
   // Quick capture from Siri / Apple Watch: plain text in, a spoken-friendly summary out.
@@ -774,12 +767,14 @@ async function handleApi(req, env, url, ctx, uid) {
     const occ = String((body && body.occ) || '');
     if (!/^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(occ)) return json({ error: 'occ required' }, 400);
     const status = body.status;
-    if (status === 'undo') { await env.DB.prepare('DELETE FROM task_log WHERE task_id = ? AND occ = ?').bind(+m[1], occ).run(); return json({ ok: true }); }
+    const pid = await catchupPerson(env, +m[1]);
+    if (status === 'undo') { await env.DB.prepare('DELETE FROM task_log WHERE task_id = ? AND occ = ?').bind(+m[1], occ).run(); if (pid) await afterTalk(env, uid, pid); return json({ ok: true }); }
     if (!['done', 'partial', 'skipped'].includes(status)) return json({ error: 'status must be done, partial, skipped or undo' }, 400);
     await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, amount, at, by_user) VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(task_id, occ) DO UPDATE SET status = excluded.status, amount = excluded.amount, at = excluded.at, by_user = excluded.by_user`)
       .bind(+m[1], occ, status, body.amount == null ? null : +body.amount || 0, nowIso(), uid).run();
     await env.DB.prepare('UPDATE tasks SET snooze_until = NULL WHERE id = ?').bind(+m[1]).run();
+    if (pid) await afterTalk(env, uid, pid);
     return json({ ok: true });
   }
   if ((m = /^\/api\/tasks\/(\d+)\/snooze$/.exec(path)) && method === 'POST') {
@@ -1351,6 +1346,27 @@ async function syncCreditTasks(env) {
 // Each person's birthday (if shown), important dates and catch-up become tasks, kept in step with
 // the People data. Your reminder choices on a task are kept; the person page's checkboxes set them.
 const yearlyDate = (d) => (/^\d{4}-\d{2}-\d{2}$/.test(d || '') ? d : /^--\d{2}-\d{2}$/.test(d || '') ? `2000${d.slice(1)}` : null);
+// Talks with someone are the log of their catch-up task (every person has one; with no check-in
+// it has no date and never comes due). "Last contact" on the person is worked out from that log.
+const talkHow = (v) => (['talked', 'called', 'texted', 'saw'].includes(v) ? v : 'talked');
+const talkWho = (v) => (v === 'them' ? 'them' : 'me');
+async function catchupTaskId(env, uid, personId) {
+  const ref = `catchup:${+personId}`;
+  let t = await env.DB.prepare('SELECT id FROM tasks WHERE legacy_ref = ?').bind(ref).first();
+  if (!t) { await syncPeopleTasks(env, uid, +personId); t = await env.DB.prepare('SELECT id FROM tasks WHERE legacy_ref = ?').bind(ref).first(); }
+  return t.id;
+}
+async function catchupPerson(env, taskId) {
+  const t = await env.DB.prepare("SELECT legacy_ref FROM tasks WHERE id = ? AND kind = 'catchup'").bind(taskId).first();
+  return t && /^catchup:\d+$/.test(t.legacy_ref || '') ? +t.legacy_ref.slice(8) : null;
+}
+async function afterTalk(env, uid, personId) {
+  const last = await env.DB.prepare(`SELECT l.at, l.how FROM task_log l JOIN tasks t ON t.id = l.task_id
+    WHERE t.legacy_ref = ? AND l.status != 'skipped' ORDER BY l.occ DESC, l.at DESC LIMIT 1`).bind(`catchup:${+personId}`).first();
+  const r = await updateRow(env, 'people', +personId, { last_contact_at: last ? last.at : null, last_contact_how: last ? last.how || 'talked' : null });
+  await syncPeopleTasks(env, uid, +personId);
+  return r;
+}
 async function syncPeopleTasks(env, uid, personId = null) {
   const tz = env.TZ || 'America/Chicago';
   const today = localParts(new Date(), tz).date;
@@ -1365,11 +1381,11 @@ async function syncPeopleTasks(env, uid, personId = null) {
       const dd = yearlyDate(d.date);
       if (dd) want.push({ ref: `pdate:${d.id}`, kind: 'pdate', title: `${first}: ${d.label}`, date: dd, repeat: 'yearly', nag: d.remind ? 1 : 0, details: { person_id: p.id, first, label: d.label } });
     }
-    if (p.checkin_days) {
-      const lastDay = p.last_contact_at ? localParts(new Date(p.last_contact_at), tz).date : null;
-      const due = lastDay ? new Date(Date.UTC(+lastDay.slice(0, 4), +lastDay.slice(5, 7) - 1, +lastDay.slice(8, 10) + p.checkin_days)).toISOString().slice(0, 10) : today;
-      want.push({ ref: `catchup:${p.id}`, kind: 'catchup', title: `Catch up with ${p.name}`, date: due, repeat: 'never', nag: null, details: { person_id: p.id, first, every: p.checkin_days } });
-    }
+    // Everyone has a catch-up task, so every talk has somewhere to go; it only has a date
+    // (and comes due) when a check-in is set.
+    const lastDay = p.last_contact_at ? localParts(new Date(p.last_contact_at), tz).date : null;
+    const due = !p.checkin_days ? null : lastDay ? new Date(Date.UTC(+lastDay.slice(0, 4), +lastDay.slice(5, 7) - 1, +lastDay.slice(8, 10) + p.checkin_days)).toISOString().slice(0, 10) : today;
+    want.push({ ref: `catchup:${p.id}`, kind: 'catchup', title: `Catch up with ${p.name}`, date: due, repeat: 'never', nag: null, details: { person_id: p.id, first, every: p.checkin_days || null } });
   }
   const stmts = want.map((w) => env.DB.prepare(`INSERT INTO tasks (user_id, kind, title, details, date, repeat, nag, nag_mode, archived, legacy_ref, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'hourly', 0, ?, ?)
@@ -1418,7 +1434,7 @@ async function loadTasks(env, uid) {
   const { results } = await env.DB.prepare('SELECT * FROM tasks WHERE archived = 0 AND (user_id = ? OR shared = 1) ORDER BY sort, id').bind(uid).all();
   const ids = results.map((t) => t.id);
   // (A subquery, not one ? per task: the database allows at most 100 bound values per query.)
-  const logs = ids.length ? (await env.DB.prepare(`SELECT task_id, occ, status, amount, at FROM task_log WHERE task_id IN (SELECT id FROM tasks WHERE archived = 0 AND (user_id = ? OR shared = 1)) AND occ >= date('now', '-750 days')`).bind(uid).all()).results : [];
+  const logs = ids.length ? (await env.DB.prepare(`SELECT id, task_id, occ, status, amount, at, how, who FROM task_log WHERE task_id IN (SELECT id FROM tasks WHERE archived = 0 AND (user_id = ? OR shared = 1)) AND occ >= date('now', '-750 days')`).bind(uid).all()).results : [];
   return { tasks: results.map(taskOut), task_log: logs };
 }
 

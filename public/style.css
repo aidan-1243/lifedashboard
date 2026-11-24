@@ -1087,3 +1087,17 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 .row.sw.trow .row-inner { padding: 0 16px; }
 .tmove { display: block; margin: -4px 0 6px 4px; font-size: 14px; }
 .tk-focus { display: flex; gap: 10px; justify-content: center; margin: 12px 0 0; }
+
+/* Person page: who reached out, and the history list */
+.who-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0 4px; }
+.who-pick .sub { margin: 0 4px 0 0; }
+.who-pick .chip-btn { min-height: 34px; padding: 0 12px; background: var(--soft); color: var(--fg); }
+.who-pick .chip-btn[aria-checked="true"] { background: var(--inverse-bg); color: var(--inverse-fg); }
+.hist-split { margin: 4px 0 8px; font-size: 13px; }
+.hist-row .t { display: flex; align-items: center; gap: 8px; }
+.hist-row .t .evmark { display: inline-flex; width: 18px; height: 18px; margin: 0; flex: none; }
+.hist-row .t .evmark svg { width: 18px; height: 18px; }
+.hist-row { flex-wrap: wrap; }
+.hist-row div.row-main { cursor: default; }
+.hist-act { display: flex; gap: 8px; width: 100%; padding: 0 0 10px; }
+.hist-act .pbtn { flex: 1; }

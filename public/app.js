@@ -1158,18 +1158,19 @@ import * as TK from './tasks.js';
   const saveHistory = () => { try { localStorage.setItem('life_history2', JSON.stringify(history.slice(0, 20))); } catch (_) { /* ignore */ } };
   // Record something you did, with what's needed to reverse it. Returns an undo function for the toast.
   // Log a talk with someone, today or on an earlier day you forgot. Undo removes that exact entry.
-  async function logTalk(p, how = 'talked', date = null) {
-    const r = await api(`/api/people/${p.id}/contact`, { body: { how, ...(date ? { date } : {}) } });
+  async function logTalk(p, how = 'talked', date = null, who = 'me') {
+    const r = await api(`/api/people/${p.id}/contact`, { body: { how, who, ...(date ? { date } : {}) } });
     const first = p.name.split(' ')[0];
     const when = date && date !== todayYmd() ? ` (${dayLabel(date)})` : '';
-    const label = `${{ talked: 'Talked to', called: 'Called', texted: 'Texted', saw: 'Saw' }[how] || 'Talked to'} ${first}${when}`;
+    const label = `${{ talked: 'Talked to', called: 'Called', texted: 'Texted', saw: 'Saw' }[how] || 'Talked to'} ${first}${when}${who === 'them' ? ' · they reached out' : ''}`;
     const undo = remember(`Logged: ${label}`, { k: 'contact', id: p.id, log: r.log_id });
     await refresh();
     toast(`Logged: ${label}`, undo);
   }
   const earlierPicker = () => `<div class="talk-earlier" hidden><div class="tk-group">
       <label class="tk-row tk-in"><span>Day</span><input type="date" name="talk_date" max="${TK.addDays(todayYmd(), -1)}" min="${TK.addDays(todayYmd(), -365)}" value="${TK.addDays(todayYmd(), -1)}"></label>
-      <label class="tk-row"><span>How</span><select name="talk_how"><option value="talked">Talked</option><option value="called">Called</option><option value="texted">Texted</option><option value="saw">Saw them</option></select></label></div>
+      <label class="tk-row"><span>How</span><select name="talk_how"><option value="talked">Talked</option><option value="called">Called</option><option value="texted">Texted</option><option value="saw">Saw them</option></select></label>
+      <label class="tk-row"><span>Who reached out</span><select name="talk_who"><option value="me">Me</option><option value="them">They did</option></select></label></div>
       <div class="btns2" style="margin-top:8px"><button type="button" class="btn dark" data-talk-log>Log it</button></div></div>`;
   function bindEarlier(root, p, after) {
     const box = root.querySelector('.talk-earlier'), open = root.querySelector('[data-talk-earlier]');
@@ -1178,8 +1179,54 @@ import * as TK from './tasks.js';
     box.querySelector('[data-talk-log]').onclick = async () => {
       const d = box.querySelector('[name="talk_date"]').value;
       if (!d || d > todayYmd()) { toast('Pick a day up to today'); return; }
-      try { if (after) after(); await logTalk(p, box.querySelector('[name="talk_how"]').value, d); } catch (err) { toast(err.message); }
+      try { if (after) after(); await logTalk(p, box.querySelector('[name="talk_how"]').value, d, box.querySelector('[name="talk_who"]').value); } catch (err) { toast(err.message); }
     };
+  }
+
+  // Everything logged on a person's tasks, newest first: talks (with how and who reached out),
+  // birthdays wished, important dates, and everyday tasks linked to them.
+  const TALK_HOW = { talked: 'Talked', called: 'Called', texted: 'Texted', saw: 'Saw them' };
+  function personHistory(p) {
+    const tasks = new Map((data.tasks || []).filter((t) => t.details && t.details.person_id === p.id).map((t) => [t.id, t]));
+    return (data.task_log || []).filter((l) => tasks.has(l.task_id) && l.status !== 'skipped').map((l) => {
+      const t = tasks.get(l.task_id);
+      const label = t.kind === 'catchup' ? TALK_HOW[l.how] || 'Talked' : t.kind === 'birthday' ? 'Wished happy birthday' : t.kind === 'pdate' ? (t.details.label || t.title) : t.title;
+      return { l, t, talk: t.kind === 'catchup', label, d: l.occ.slice(0, 10) };
+    }).sort((a, z) => z.d.localeCompare(a.d) || String(z.l.at).localeCompare(String(a.l.at)));
+  }
+  const histDay = (d) => { const x = parseDay(d); return d === todayYmd() ? 'Today' : d === TK.addDays(todayYmd(), -1) ? 'Yesterday' : x.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', ...(x.getFullYear() !== new Date().getFullYear() ? { year: 'numeric' } : {}) }); };
+  function historyHtml(p, all = false) {
+    const h = personHistory(p);
+    if (!h.length) return '';
+    const yearAgo = TK.addDays(todayYmd(), -365);
+    const talks = h.filter((x) => x.talk && x.d >= yearAgo);
+    const me = talks.filter((x) => x.l.who === 'me').length, them = talks.filter((x) => x.l.who === 'them').length;
+    const split = me + them ? `<p class="sub hist-split">Past year: <strong>you reached out ${me}</strong> · <strong>they reached out ${them}</strong>${talks.length > me + them ? ` · ${talks.length - me - them} not marked` : ''}</p>` : '';
+    const shown = all ? h : h.slice(0, 8);
+    return `<div class="lbl" style="font-size:13px;font-weight:600;color:var(--muted)">History</div>${split}
+      <div class="card no-when"><ul class="list">${shown.map((x) => `<li class="row hist-row">
+        <${x.talk ? `button type="button" data-hist="${x.l.id}"` : 'div'} class="row-main"><div class="t">${kindMark(x.talk ? 'chat' : TASK_ICON[x.t.kind] || 'check')} ${esc(x.label)}</div>
+          <div class="meta">${esc(histDay(x.d))}${x.talk ? ` · ${x.l.who === 'them' ? 'They reached out' : x.l.who === 'me' ? 'You reached out' : 'Tap to mark who reached out'}` : ''}</div></${x.talk ? 'button' : 'div'}>
+        ${x.talk ? `<div class="hist-act" data-hist-act="${x.l.id}" hidden><button type="button" class="pbtn${x.l.who === 'me' ? ' take' : ''}" data-who="me">I did</button><button type="button" class="pbtn${x.l.who === 'them' ? ' take' : ''}" data-who="them">They did</button><button type="button" class="pbtn" data-hist-del>Remove</button></div>` : ''}</li>`).join('')}</ul></div>
+      ${!all && h.length > shown.length ? `<div class="btns2 tk-focus"><button type="button" class="pbtn" data-hist-all>Show all ${h.length}</button></div>` : ''}`;
+  }
+  function bindHistory(root, p) {
+    const box = root.querySelector('.p-history');
+    if (!box) return;
+    const draw = (all) => { box.innerHTML = historyHtml(p, all); wire(all); };
+    const wire = (all) => {
+      const more = box.querySelector('[data-hist-all]'); if (more) more.onclick = () => draw(true);
+      box.querySelectorAll('[data-hist]').forEach((b) => { b.onclick = () => { const a = box.querySelector(`[data-hist-act="${b.dataset.hist}"]`); a.hidden = !a.hidden; }; });
+      box.querySelectorAll('[data-hist-act]').forEach((a) => {
+        const id = a.dataset.histAct;
+        a.querySelectorAll('[data-who]').forEach((w) => { w.onclick = async () => { try { await api(`/api/people/${p.id}/contact/${id}`, { method: 'PATCH', body: { who: w.dataset.who } }); await refresh(); draw(all); } catch (err) { toast(err.message); } }; });
+        a.querySelector('[data-hist-del]').onclick = async () => {
+          if (!confirm('Remove this from the history?')) return;
+          try { await api(`/api/people/${p.id}/contact/${id}`, { method: 'DELETE' }); await refresh(); draw(all); toast('Removed'); } catch (err) { toast(err.message); }
+        };
+      });
+    };
+    wire(false);
   }
 
   function remember(label, undo) {
@@ -2677,8 +2724,11 @@ import * as TK from './tasks.js';
         <span class="avatar lg a-people">${esc(initials(p.name))}</span>
         <div><h3>${esc(p.name)}</h3><p class="sub" style="margin:2px 0 0">${[
           b ? `Birthday ${b.date.toLocaleDateString([], { month: 'long', day: 'numeric' })}${b.days === 0 ? ' (today)' : ` (in ${b.days} days)`}` : '',
-          p.last_contact_at ? `last ${esc(p.last_contact_how || 'contact')} ${daysBetween(new Date(p.last_contact_at), new Date())} days ago` : 'no contact logged',
+          p.last_contact_at ? (() => { const n = daysBetween(new Date(p.last_contact_at), new Date()); return `last ${esc(p.last_contact_how || 'contact')} ${n <= 0 ? 'today' : n === 1 ? 'yesterday' : `${n} days ago`}`; })() : 'no contact logged',
         ].filter(Boolean).join(' · ')}</p></div></div>
+      <div class="who-pick" role="radiogroup" aria-label="Who reached out"><span class="sub">Who reached out?</span>
+        <button type="button" class="chip-btn" role="radio" aria-checked="true" data-whopick="me">Me</button>
+        <button type="button" class="chip-btn" role="radio" aria-checked="false" data-whopick="them">They did</button></div>
       <div class="btns">
         <button type="button" class="pbtn" data-log="called">Called ✓</button>
         <button type="button" class="pbtn" data-log="texted">Texted ✓</button>
@@ -2695,8 +2745,9 @@ import * as TK from './tasks.js';
       </div>
       ${p.id ? `<div id="p-extras"${inCircle(p) ? '' : ' hidden'}>${personExtras(p)}</div>
       <p class="sub" id="p-extras-hint" style="margin:0"${inCircle(p) ? ' hidden' : ''}>Set them as Family or Close friend to keep gift ideas and important dates.</p>` : ''}
-      ${p.id ? (() => { const ts = (data.tasks || []).filter((t) => PEOPLE_KINDS.includes(t.kind) && t.details && t.details.person_id === p.id);
+      ${p.id ? (() => { const ts = (data.tasks || []).filter((t) => PEOPLE_KINDS.includes(t.kind) && t.date && !t.archived && t.details && t.details.person_id === p.id);
         return ts.length ? `<div class="lbl" style="font-size:13px;font-weight:600;color:var(--muted)">Reminders and streaks</div><div class="card no-when"><ul class="list">${ts.map((t) => `<li class="row"><button type="button" class="row-main" data-ptask="${t.id}"><div class="t">${esc(t.kind === 'birthday' ? 'Birthday' : t.kind === 'catchup' ? 'Catch up' : (t.details.label || t.title))}</div><div class="meta">${t.kind === 'catchup' ? `every ${t.details.every} days · next ${esc(dayLabel(t.date))}` : esc(parseDay(t.date).toLocaleDateString([], { month: 'long', day: 'numeric' }))}${t.nag ? ` · ${esc(TK.describeNag(t).toLowerCase())}` : ''}</div></button>${flame(streakOf(t).current)}</li>`).join('')}</ul></div>` : ''; })() : ''}
+      ${p.id ? `<div class="p-history">${historyHtml(p)}</div>` : ''}
       <label class="inline"><input type="checkbox" name="bday_notify"${p.bday_notify !== 0 ? ' checked' : ''}> Show their birthday on Today and in my briefing</label>
       <label class="inline"><input type="checkbox" name="bday_remind"${p.bday_remind ? ' checked' : ''}> Remind me hourly on their birthday until I've wished them</label>
       <label class="field"><span>Notes</span><textarea name="notes">${esc(p.notes)}</textarea></label>
@@ -2732,10 +2783,16 @@ import * as TK from './tasks.js';
     form.querySelectorAll('[data-log]').forEach((btn) => {
       btn.onclick = async () => {
         sheet.close();
-        await logTalk(p, btn.dataset.log);
+        await logTalk(p, btn.dataset.log, null, who);
       };
     });
-    if (p.id) bindEarlier(form, p, () => sheet.close());
+    let who = 'me';
+    form.querySelectorAll('[data-whopick]').forEach((b) => { b.onclick = () => {
+      who = b.dataset.whopick;
+      form.querySelectorAll('[data-whopick]').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+      const sel = form.querySelector('[name="talk_who"]'); if (sel) sel.value = who;
+    }; });
+    if (p.id) { bindEarlier(form, p, () => sheet.close()); bindHistory(form, p); }
     showSheet();
   }
 
