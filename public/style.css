@@ -1086,3 +1086,4 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 .row.sw.trow[data-dir="later"]::before { content: attr(data-later); }
 .row.sw.trow .row-inner { padding: 0 16px; }
 .tmove { display: block; margin: -4px 0 6px 4px; font-size: 14px; }
+.tk-focus { display: flex; gap: 10px; justify-content: center; margin: 12px 0 0; }

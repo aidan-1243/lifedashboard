@@ -34,7 +34,6 @@ async function loadEventPrefs(env, uid = 1) {
   return Object.fromEntries((await eventPrefRows(env, uid)).map((r) => [r.key, r]));
 }
 // Minutes between repeat notifications (a little under the period so the 15-minute cron never skips one).
-const NAG_GAP_MIN = { '15m': 14, hourly: 58, daily: 1380 };
 
 // Lockout: this many failed passwords (or bad button links) from one IP address
 // within the window blocks that address until the window passes.
@@ -171,7 +170,7 @@ async function listUsers(env) {
 // Is this row yours? Tasks also count when they're shared.
 async function owns(env, table, id, uid) {
   const sql = {
-    items: 'SELECT 1 AS ok FROM items WHERE id = ? AND (user_id = ? OR shared = 1)',
+    items: "SELECT 1 AS ok FROM tasks WHERE id = ? AND kind = 'task' AND (user_id = ? OR shared = 1)",
     people: 'SELECT 1 AS ok FROM people WHERE id = ? AND user_id = ?',
     tasks: 'SELECT 1 AS ok FROM tasks WHERE id = ? AND (user_id = ? OR shared = 1)',
     documents: 'SELECT 1 AS ok FROM documents WHERE id = ? AND user_id = ?',
@@ -296,22 +295,124 @@ async function updateRow(env, table, id, data) {
   return env.DB.prepare(sql).bind(...keys.map((k) => data[k]), id).first();
 }
 
-// ---------- item state changes (shared by API and notification buttons) ----------
+// ---------- everyday tasks (kind "task"; they used to be the items table) ----------
+// The older routes (/api/items, Wayfare sync, Siri capture, document renewals, nudges) still speak
+// the old item shape { title, notes, area, kind, due_at, nag, repeat_days, top3, person_id, trip_id,
+// shared, snooze_until, status }. These helpers turn that into a task (see public/tasks.js todoOcc).
+// Old reminder settings map to: hourly / every 15 min -> nag hourly; daily -> nag daily at its time;
+// once -> no nag (one alert at the due time); none -> no alerts at all (details.silent).
 
-async function completeItem(env, id) {
-  const item = await env.DB.prepare('SELECT * FROM items WHERE id = ?').bind(id).first();
-  if (!item) return null;
-  if (item.repeat_days) {
-    const step = item.repeat_days * 86400000;
-    let due = item.due_at ? Date.parse(item.due_at) : Date.now();
-    do due += step; while (due <= Date.now());
-    return updateRow(env, 'items', id, { due_at: new Date(due).toISOString(), snooze_until: null, last_notified_at: null, notify_count: 0, done_at: nowIso() });
+const pad2 = (n) => String(n).padStart(2, '0');
+const TZ = (env) => env.TZ || 'America/Chicago';
+
+function todoFields(b, tz, prev = null) {
+  const out = {};
+  const det = prev ? { ...(prev.details || {}) } : {};
+  if ('title' in b) out.title = String(b.title || '').trim().slice(0, 200);
+  for (const k of ['notes', 'area', 'source']) if (k in b) { if (b[k]) det[k] = String(b[k]).slice(0, k === 'notes' ? 2000 : 40); else delete det[k]; }
+  for (const k of ['person_id', 'trip_id']) if (k in b) { if (+b[k]) det[k] = +b[k]; else delete det[k]; }
+  if ('top3' in b) { if (b.top3) det.top3 = 1; else delete det.top3; }
+  if ('kind' in b) { if (b.kind === 'note') det.note = 1; else delete det.note; }
+  if ('due_at' in b) {
+    if (b.due_at && Date.parse(b.due_at)) {
+      const p = localParts(new Date(b.due_at), tz); const hm = `${pad2(p.h)}:${pad2(p.min)}`;
+      Object.assign(out, { date: p.date, time: hm === '09:00' ? null : hm }); // 9:00 means "no time" (old convention)
+    } else Object.assign(out, { date: null, time: null });
   }
-  return updateRow(env, 'items', id, { status: 'done', done_at: nowIso(), snooze_until: null });
+  if ('repeat_days' in b) {
+    const n = Math.round(+b.repeat_days);
+    Object.assign(out, n > 0 ? { repeat: 'custom', custom: JSON.stringify({ freq: 'daily', interval_n: Math.min(366, n) }) } : { repeat: 'never', custom: null });
+  }
+  if ('nag' in b) {
+    const n = b.nag;
+    if (n === 'hourly' || n === '15m') Object.assign(out, { nag: 1, nag_mode: 'hourly' });
+    else if (n === 'daily') Object.assign(out, { nag: 1, nag_mode: 'daily', nag_time: ('time' in out ? out.time : prev && prev.time) || '09:00' });
+    else out.nag = 0;
+    if (n === 'none') det.silent = 1; else delete det.silent;
+  }
+  if ('snooze_until' in b) out.snooze_until = b.snooze_until && Date.parse(b.snooze_until) ? new Date(b.snooze_until).toISOString() : null;
+  if ('shared' in b) out.shared = b.shared ? 1 : 0;
+  out.details = JSON.stringify(det);
+  return out;
 }
 
-async function snoozeItem(env, id, minutes) {
-  return updateRow(env, 'items', id, { snooze_until: new Date(Date.now() + minutes * 60000).toISOString() });
+async function todoRow(env, where, arg) {
+  const r = await env.DB.prepare(`SELECT * FROM tasks WHERE kind = 'task' AND ${where}`).bind(arg).first();
+  return r ? taskOut(r) : null;
+}
+const todoLogs = async (env, id) => (await env.DB.prepare('SELECT task_id, occ, status, at FROM task_log WHERE task_id = ?').bind(id).all()).results;
+const clearTodoNags = (env, id) => env.DB.prepare('DELETE FROM task_nags WHERE key LIKE ?').bind(`todo:${id}:%`).run();
+
+async function createTodo(env, b, uid, extra = {}) {
+  const f = todoFields(b, TZ(env));
+  if (!f.title) throw new Error('title required');
+  const row = await insertRow(env, 'tasks', { kind: 'task', repeat: 'never', nag: 0, nag_mode: 'hourly', ...f, ...extra, user_id: uid, created_at: nowIso() });
+  if (b.status === 'done') await completeTodo(env, row.id, uid);
+  return taskOut(row);
+}
+
+// Finish (or skip) the occurrence that's due now; an undated one-off is logged on today.
+async function completeTodo(env, id, uid, status = 'done') {
+  const t = await todoRow(env, 'id = ?', id);
+  if (!t) return null;
+  const today = localParts(new Date(), TZ(env)).date;
+  const o = TK.todoOcc(t, await todoLogs(env, id), today);
+  if (!o || o.log) return { ok: true, already: true };
+  await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, at, by_user) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(task_id, occ) DO UPDATE SET status = excluded.status, at = excluded.at, by_user = excluded.by_user`).bind(id, o.key, status, nowIso(), uid).run();
+  await env.DB.prepare('UPDATE tasks SET snooze_until = NULL WHERE id = ?').bind(id).run();
+  return { ok: true, occ: o.key };
+}
+// Undo the last completion
+async function reopenTodo(env, id) {
+  const last = await env.DB.prepare('SELECT occ FROM task_log WHERE task_id = ? ORDER BY occ DESC LIMIT 1').bind(id).first();
+  if (last) await env.DB.prepare('DELETE FROM task_log WHERE task_id = ? AND occ = ?').bind(id, last.occ).run();
+  await clearTodoNags(env, id);
+  return { ok: true };
+}
+async function updateTodo(env, id, b, uid) {
+  const prev = await todoRow(env, 'id = ?', id);
+  if (!prev) return null;
+  const f = todoFields(b, TZ(env), prev);
+  if ('title' in f && !f.title) delete f.title;
+  const row = await updateRow(env, 'tasks', id, f);
+  if ('due_at' in b || 'nag' in b) await clearTodoNags(env, id);
+  if (b.status === 'done') await completeTodo(env, id, uid);
+  if (b.status === 'open') await reopenTodo(env, id);
+  return taskOut(row);
+}
+// Create or update by an outside id (Wayfare booking, document renewal...). `reopen` puts a
+// finished one back on the list (a renewal whose date changed, a new month's backup).
+async function upsertTodo(env, ref, b, uid, { reopen = false, onlyCreate = false } = {}) {
+  const prev = await todoRow(env, 'legacy_ref = ?', ref);
+  if (!prev) return createTodo(env, b, uid, { legacy_ref: ref });
+  if (onlyCreate) return prev;
+  const f = todoFields(b, TZ(env), prev);
+  await updateRow(env, 'tasks', prev.id, { ...f, archived: 0 });
+  const done = !!TK.todoOcc(prev, await todoLogs(env, prev.id), localParts(new Date(), TZ(env)).date)?.log;
+  if (b.status === 'done' && !done) await completeTodo(env, prev.id, uid);
+  else if ((b.status === 'open' || reopen) && done) await reopenTodo(env, prev.id);
+  if ('due_at' in b && b.due_at !== undefined) await clearTodoNags(env, prev.id);
+  return prev;
+}
+
+// Open everyday tasks with the occurrence due now, for reminders and counts.
+// mode 'mine' = ones whose reminders go to this person; 'visible' = everything they can see.
+async function openTodos(env, uid, local, tz, mode = 'mine') {
+  const who = mode === 'mine' ? '((remind_to IS NULL AND user_id = ?) OR remind_to = ? OR (remind_to = 0 AND (user_id = ? OR shared = 1)))' : '(user_id = ? OR shared = 1 OR remind_to = ? OR ? = 0)';
+  const sql = `SELECT * FROM tasks WHERE kind = 'task' AND archived = 0 AND ${who}`;
+  const { results } = await env.DB.prepare(sql).bind(uid, uid, uid).all();
+  if (!results.length) return [];
+  const logs = (await env.DB.prepare(`SELECT task_id, occ, status, at FROM task_log WHERE task_id IN (SELECT id FROM tasks WHERE kind = 'task' AND archived = 0 AND ${who})`).bind(uid, uid, uid).all()).results;
+  const out = [];
+  for (const t of results.map(taskOut)) {
+    const o = TK.todoOcc(t, logs, local.date);
+    if (!o || o.log || !o.date) continue;
+    const [h, mi] = (o.time || '09:00').split(':').map(Number);
+    const [y, m, d] = o.date.split('-').map(Number);
+    out.push({ t, o, due: zonedToUtc(y, m, d, h, mi, tz) });
+  }
+  return out;
 }
 
 // ---------- API ----------
@@ -324,9 +425,7 @@ async function handleApi(req, env, url, ctx, uid) {
 
   if (path === '/api/state' && method === 'GET') {
     const homeP = loadHome(env);
-    const [items, people, events, trips, documents, eventPrefs, gifts, personDates, homeTasks, homeLog, meals, mealTitles, settings] = await Promise.all([
-      // Open tasks, ones finished in the last day, and every task in a trip (for "6 of 9 booked")
-      env.DB.prepare("SELECT * FROM items WHERE (user_id = ? OR shared = 1) AND (status = 'open' OR done_at > datetime('now', '-1 day') OR trip_id IS NOT NULL) ORDER BY due_at IS NULL, due_at").bind(uid).all(),
+    const [people, events, trips, documents, eventPrefs, gifts, personDates, homeTasks, homeLog, meals, mealTitles, settings] = await Promise.all([
       env.DB.prepare('SELECT * FROM people WHERE user_id = ? ORDER BY name COLLATE NOCASE').bind(uid).all(),
       visibleEvents(env, uid).then((results) => ({ results })),
       env.DB.prepare("SELECT * FROM trips WHERE COALESCE(end_date, start_date) >= date('now', '-1 day') ORDER BY start_date").all(),
@@ -348,7 +447,7 @@ async function handleApi(req, env, url, ctx, uid) {
     const me = { id: uid, name: meRow.name };
     const prefs = Object.fromEntries(eventPrefs.results.map((r) => [r.key, r]));
     const evs = events.results.map((e) => ({ ...e, ...eventKeys(e), pref: eventPref(e, prefs, settings) }));
-    return json({ items: items.results, people: people.results, events: evs, event_prefs: eventPrefs.results, trips: trips.results, documents: documents.results,
+    return json({ people: people.results, events: evs, event_prefs: eventPrefs.results, trips: trips.results, documents: documents.results,
       gifts: gifts.results, person_dates: personDates.results, home_tasks: homeTasks.results, home_log: homeLog.results, meals: meals.results, meal_titles: mealTitles.results, settings, tz: env.TZ || 'America/Chicago', auth: env.ACCESS_AUD ? 'access' : 'password',
       me, users: users.map((u) => ({ id: u.id, name: u.name })), rewards: await loadRewards(env), ...(await loadTasks(env, uid)),
       push: { public_key: env.VAPID_PUBLIC || '', devices: (await env.DB.prepare('SELECT device, created_at, last_ok_at, last_error, endpoint FROM push_subs WHERE user_id = ?').bind(uid).all()).results } });
@@ -373,32 +472,20 @@ async function handleApi(req, env, url, ctx, uid) {
     return json({ ok: true });
   }
 
-  // Items
+  // Everyday tasks in the old item shape (Siri, the + button, Wayfare...). They're tasks of kind "task".
   if (path === '/api/items' && method === 'POST') {
-    const data = pick(body, ITEM_FIELDS);
-    if (!data.title) return json({ error: 'title required' }, 400);
-    data.shared = data.shared ? 1 : 0;
-    return json(await insertRow(env, 'items', { ...data, user_id: uid }), 201);
+    try { return json(await createTodo(env, body || {}, uid), 201); } catch (e) { return json({ error: e.message }, 400); }
   }
   if ((m = /^\/api\/items\/(\d+)(\/done|\/snooze)?$/.exec(path)) && !(await owns(env, 'items', +m[1], uid))) return notYours();
   if ((m = /^\/api\/items\/(\d+)$/.exec(path))) {
-    if (method === 'PATCH') {
-      const data = pick(body, ITEM_FIELDS);
-      if ('due_at' in data || 'nag' in data) Object.assign(data, { notify_count: 0, last_notified_at: null });
-      if (data.status === 'open') data.done_at = null;
-      if ('shared' in data) data.shared = data.shared ? 1 : 0;
-      return json(await updateRow(env, 'items', +m[1], data));
-    }
-    if (method === 'DELETE') {
-      await env.DB.prepare('DELETE FROM items WHERE id = ?').bind(+m[1]).run();
-      return json({ ok: true });
-    }
+    if (method === 'PATCH') return json(await updateTodo(env, +m[1], pick(body, ITEM_FIELDS), uid));
+    if (method === 'DELETE') { await env.DB.prepare('UPDATE tasks SET archived = 1 WHERE id = ?').bind(+m[1]).run(); return json({ ok: true }); }
   }
-  if ((m = /^\/api\/items\/(\d+)\/done$/.exec(path)) && method === 'POST') return json(await completeItem(env, +m[1]));
+  if ((m = /^\/api\/items\/(\d+)\/done$/.exec(path)) && method === 'POST') return json(await completeTodo(env, +m[1], uid));
   if ((m = /^\/api\/items\/(\d+)\/snooze$/.exec(path)) && method === 'POST') {
-    const until = body && Date.parse(body.until);
-    if (until && until > Date.now()) return json(await updateRow(env, 'items', +m[1], { snooze_until: new Date(until).toISOString() }));
-    return json(await snoozeItem(env, +m[1], +(body && body.minutes) || 60));
+    const until = Date.parse(body && body.until) || Date.now() + (+(body && body.minutes) || 60) * 60000;
+    await env.DB.prepare('UPDATE tasks SET snooze_until = ? WHERE id = ?').bind(new Date(Math.max(until, Date.now() + 60000)).toISOString(), +m[1]).run();
+    return json({ ok: true });
   }
 
   // People
@@ -579,7 +666,7 @@ async function handleApi(req, env, url, ctx, uid) {
     const ids = ((body && body.ids) || []).map(Number).filter(Boolean).slice(0, 200);
     const until = Date.parse(body && body.to);
     if (!ids.length || !until) return json({ error: 'ids and to required' }, 400);
-    await env.DB.batch(ids.map((id) => env.DB.prepare("UPDATE items SET due_at = ?, snooze_until = NULL, notify_count = 0, last_notified_at = NULL WHERE id = ? AND status = 'open' AND (user_id = ? OR shared = 1)").bind(new Date(until).toISOString(), id, uid)));
+    for (const id of ids) if (await owns(env, 'items', id, uid)) await updateTodo(env, id, { due_at: new Date(until).toISOString(), snooze_until: null }, uid);
     return json({ ok: true, moved: ids.length });
   }
 
@@ -595,7 +682,7 @@ async function handleApi(req, env, url, ctx, uid) {
     if (method === 'DELETE') {
       await env.DB.batch([
         env.DB.prepare('DELETE FROM documents WHERE id = ?').bind(+m[1]),
-        env.DB.prepare("DELETE FROM items WHERE external_id = ? AND status = 'open'").bind(`doc:${+m[1]}`),
+        env.DB.prepare("UPDATE tasks SET archived = 1 WHERE kind = 'task' AND legacy_ref = ?").bind(`x:doc:${+m[1]}`),
       ]);
       return json({ ok: true });
     }
@@ -638,13 +725,18 @@ async function handleApi(req, env, url, ctx, uid) {
     if (!data.title) return json({ error: 'title required' }, 400);
     const max = await env.DB.prepare('SELECT COALESCE(MAX(sort), 0) AS s FROM tasks WHERE user_id = ? AND kind = ?').bind(uid, data.kind || 'task').first();
     const row = await insertRow(env, 'tasks', { kind: 'task', repeat: 'never', ...data, user_id: uid, sort: max.s + 1, created_at: nowIso(),
-      date: data.date || localParts(new Date(), env.TZ || 'America/Chicago').date });
+      // Everyday tasks may have no date ("someday"); other kinds start today
+      date: data.kind === 'task' && 'date' in data ? data.date : data.date || localParts(new Date(), env.TZ || 'America/Chicago').date });
     return json(taskOut(row), 201);
   }
   if ((m = /^\/api\/tasks\/(\d+)(\/log|\/snooze)?$/.exec(path)) && !(await owns(env, 'tasks', +m[1], uid))) return notYours();
   if ((m = /^\/api\/tasks\/(\d+)$/.exec(path))) {
     if (method === 'PATCH') {
-      const row = await updateRow(env, 'tasks', +m[1], taskFields(body || {}));
+      const before = await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(+m[1]).first();
+      const fields = taskFields(body || {});
+      const row = await updateRow(env, 'tasks', +m[1], fields);
+      // An everyday task whose schedule or reminder changed starts its reminders over
+      if (row && row.kind === 'task' && ['date', 'time', 'repeat', 'custom', 'nag', 'nag_mode', 'nag_time', 'nag_dow'].some((k) => k in fields && String(fields[k] ?? '') !== String(before[k] ?? ''))) await clearTodoNags(env, row.id);
       if ('nag' in (body || {}) && row && row.legacy_ref) {
         const [kind, ref] = row.legacy_ref.split(':');
         if (kind === 'bday') await env.DB.prepare('UPDATE people SET bday_remind = ? WHERE id = ?').bind(row.nag, +ref).run();
@@ -751,14 +843,13 @@ async function handleApi(req, env, url, ctx, uid) {
 
   // Backup: everything that's yours plus the shared household data, as one JSON file.
   // Every kind of task (habits, medications, Home, people dates, credits, dinners) is in tasks / task_log;
-  // everyday tasks and trip bookings are in items. Left out on purpose: push subscriptions (device keys).
+  // everyday tasks and trip bookings too (kind "task"). Left out on purpose: push subscriptions (device keys).
   if (path === '/api/backup' && method === 'GET') {
     const all = async (sql, ...args) => (await env.DB.prepare(sql).bind(...args).all()).results;
     const people = 'SELECT id FROM people WHERE user_id = ?';
     const out = {
       app: 'life-dashboard', version: 2, exported_at: nowIso(), person: (await all('SELECT id, name FROM users WHERE id = ?', uid))[0],
       yours: {
-        items: await all('SELECT * FROM items WHERE user_id = ? OR shared = 1', uid),
         people: await all('SELECT * FROM people WHERE user_id = ?', uid),
         contact_log: await all(`SELECT * FROM contact_log WHERE person_id IN (${people})`, uid),
         gifts: await all(`SELECT * FROM gifts WHERE person_id IN (${people})`, uid),
@@ -783,7 +874,8 @@ async function handleApi(req, env, url, ctx, uid) {
     };
     delete out.yours.settings.weather_cache;
     await setSetting(env, 'last_backup_at', nowIso(), uid);
-    await env.DB.prepare("UPDATE items SET status = 'done', done_at = ? WHERE external_id = ? AND status = 'open'").bind(nowIso(), `backup:${uid}`).run();
+    const bt = await todoRow(env, 'legacy_ref = ?', `x:backup:${uid}`);
+    if (bt) await completeTodo(env, bt.id, uid);
     const day = localParts(new Date(), env.TZ || 'America/Chicago').date;
     return new Response(JSON.stringify(out, null, 1), { headers: { 'content-type': 'application/json', 'content-disposition': `attachment; filename="life-backup-${day}.json"` } });
   }
@@ -831,11 +923,7 @@ async function saveDocument(env, id, body, uid = 1) {
   const [y, mo, d] = expires.split('-').map(Number);
   const when = new Date(Date.UTC(y, mo - 1 - months, d));
   const due = zonedToUtc(when.getUTCFullYear(), when.getUTCMonth() + 1, when.getUTCDate(), 9, 0, tz).toISOString();
-  await env.DB.prepare(`INSERT INTO items (title, area, due_at, nag, source, external_id, notes, user_id)
-      VALUES (?, 'travel', ?, 'once', 'documents', ?, ?, ?)
-      ON CONFLICT(external_id) DO UPDATE SET title = excluded.title, due_at = excluded.due_at, notes = excluded.notes,
-        status = 'open', done_at = NULL, notify_count = 0, last_notified_at = NULL`)
-    .bind(`Renew ${name}`, due, `doc:${doc.id}`, `Expires ${expires}`, uid).run();
+  await upsertTodo(env, `x:doc:${doc.id}`, { title: `Renew ${name}`, area: 'travel', due_at: due, nag: 'once', source: 'documents', notes: `Expires ${expires}` }, uid, { reopen: true });
   return doc;
 }
 
@@ -898,10 +986,10 @@ async function captureText(env, raw, uid = 1) {
   const people = (await env.DB.prepare('SELECT id, name FROM people WHERE user_id = ?').bind(uid).all()).results;
   const parsed = parseCapture(text, people, new Date(now.getTime() + offset));
   const due = parsed.due ? new Date(parsed.due.getTime() - offset) : null;
-  await insertRow(env, 'items', {
+  await createTodo(env, {
     title: parsed.title, area: parsed.area, kind: parsed.kind, due_at: due ? due.toISOString() : null,
-    nag: parsed.nag, repeat_days: parsed.repeat || null, person_id: parsed.person ? parsed.person.id : null, source: 'siri', user_id: uid,
-  });
+    nag: parsed.nag, repeat_days: parsed.repeat || null, person_id: parsed.person ? parsed.person.id : null, source: 'siri',
+  }, uid);
   const when = due ? new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long', hour: 'numeric', minute: '2-digit' }).format(due) : null;
   const how = { hourly: 'reminding you hourly', daily: 'reminding you daily', '15m': 'reminding you every 15 minutes', once: 'one reminder' }[parsed.nag];
   return reply(`Added "${parsed.title}"${when ? `, ${when}` : ''}${due && how ? `, ${how}` : ''}.`);
@@ -954,19 +1042,16 @@ function weatherLine(w) {
 
 async function syncItems(env, body, uid = 1) {
   const source = (body && body.source) || 'external';
-  const items = (body && body.items) || [];
-  const stmts = items.filter((i) => i.external_id && i.title).map((i) =>
-    env.DB.prepare(`INSERT INTO items (title, notes, area, due_at, nag, source, external_id, status, done_at, user_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(external_id) DO UPDATE SET title = excluded.title, notes = excluded.notes, area = excluded.area,
-        due_at = excluded.due_at, status = excluded.status, done_at = excluded.done_at`)
-      .bind(i.title, i.notes || null, i.area || 'travel', i.due_at || null, i.nag || 'hourly', source, `${uid === 1 ? '' : `u${uid}:`}${source}:${i.external_id}`,
-        i.done ? 'done' : 'open', i.done ? nowIso() : null, uid));
-  if (stmts.length) await env.DB.batch(stmts);
+  const items = ((body && body.items) || []).filter((i) => i.external_id && i.title).slice(0, 300);
   // Bookings belong to their trip (matched by the trip's Wayfare id)
-  await env.DB.prepare(`UPDATE items SET trip_id = (SELECT t.id FROM trips t WHERE t.external_id IS NOT NULL AND items.external_id LIKE t.external_id || ':%')
-    WHERE trip_id IS NULL AND external_id LIKE ?`).bind(`%${source}:%`).run();
-  return { ok: true, synced: stmts.length };
+  const { results: trips } = await env.DB.prepare('SELECT id, external_id FROM trips WHERE external_id IS NOT NULL').all();
+  for (const i of items) {
+    const ext = `${source}:${i.external_id}`;
+    const trip = trips.find((t) => ext.startsWith(`${t.external_id}:`));
+    await upsertTodo(env, `x:${uid === 1 ? '' : `u${uid}:`}${ext}`, { title: i.title, notes: i.notes || null, area: i.area || 'travel', due_at: i.due_at || null,
+      nag: i.nag || 'hourly', source, status: i.done ? 'done' : 'open', ...(trip ? { trip_id: trip.id } : {}) }, uid);
+  }
+  return { ok: true, synced: items.length };
 }
 
 // ---------- vCard import (one-time Contacts load) ----------
@@ -1099,18 +1184,33 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
   if (quiet) return report;
   if (s.focus_until && Date.parse(s.focus_until) > now.getTime()) { report.focus = true; return report; }
 
-  // Your own tasks, including ones you shared (the person who owns a task gets its nags).
-  const { results } = await env.DB.prepare(`SELECT * FROM items WHERE user_id = ? AND status = 'open' AND kind = 'task' AND nag != 'none'
-    AND due_at IS NOT NULL AND due_at <= ? AND (snooze_until IS NULL OR snooze_until <= ?)`).bind(uid, now.toISOString(), now.toISOString()).all();
-
-  // Which items are due for a reminder this run
-  const due = results.filter((item) => {
-    const sinceMin = item.last_notified_at ? (now - Date.parse(item.last_notified_at)) / 60000 : Infinity;
-    return item.nag === 'once' ? item.notify_count === 0 : sinceMin >= (NAG_GAP_MIN[item.nag] || 58);
-  });
+  // Everyday tasks whose reminders go to you (yours, or ones set to remind you / both of you).
+  //   nag off: one alert at the due time (9am for date-only), unless it's set to stay silent
+  //   hourly: every hour from the due time;  daily / weekly: once a day (on the chosen weekday) after the chosen time
+  const dow = new Date(Date.UTC(local.y, local.m - 1, local.d)).getUTCDay();
+  const minutesNow = local.h * 60 + local.min;
+  const open = (await openTodos(env, uid, local, tz)).filter(({ t, due }) => due <= now && !(t.snooze_until && Date.parse(t.snooze_until) > now) && !(t.details && t.details.note));
+  const nagRows = open.length ? Object.fromEntries((await env.DB.prepare('SELECT key, last_at, count FROM task_nags WHERE key LIKE ?').bind(`todo:%:${uid}:%`).all()).results.map((r) => [r.key, r])) : {};
+  const due = [];
+  for (const { t, o, due: dueAt } of open) {
+    const key = `todo:${t.id}:${uid}:${o.key}`;
+    const n = nagRows[key];
+    const mode = t.nag ? t.nag_mode : (t.details && t.details.silent ? 'none' : 'once');
+    let send = false;
+    if (mode === 'once') send = !n;
+    else if (mode === 'hourly') send = !n || (now - Date.parse(n.last_at)) / 60000 >= 58;
+    else if (mode === 'daily' || mode === 'weekly') {
+      const [h, mi] = String(t.nag_time || '09:00').split(':').map(Number);
+      send = minutesNow >= h * 60 + mi && (mode === 'daily' || dow === (t.nag_dow ?? 1)) && (!n || localParts(new Date(n.last_at), tz).date !== local.date);
+    }
+    if (!send) continue;
+    const d = t.details || {};
+    due.push({ id: t.id, key, title: t.title, area: d.area, source: d.source, external_id: (t.legacy_ref || '').replace(/^x:(u\d+:)?/, ''),
+      due_at: dueAt.toISOString(), nag: mode, notify_count: n ? n.count : 0 });
+  }
   const markSent = async (items) => {
-    await env.DB.batch(items.map((it) => env.DB.prepare('UPDATE items SET last_notified_at = ?, notify_count = notify_count + 1 WHERE id = ?').bind(now.toISOString(), it.id)));
-    report.sent.push(...items.map((it) => it.id));
+    await env.DB.batch(items.map((it) => env.DB.prepare('INSERT INTO task_nags (key, last_at) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET last_at = excluded.last_at, count = task_nags.count + 1').bind(it.key, now.toISOString())));
+    report.sent.push(...items.map((it) => it.key));
   };
   const whenText = (item) => {
     const overdueMin = (now - Date.parse(item.due_at)) / 60000;
@@ -1274,7 +1374,7 @@ function taskFields(b) {
   if ('repeat' in b) out.repeat = TASK_REPEATS.includes(b.repeat) ? b.repeat : 'never';
   if ('custom' in b) {
     const c = b.custom && typeof b.custom === 'object' ? b.custom : null;
-    out.custom = c ? JSON.stringify({ freq: ['daily', 'weekly', 'monthly'].includes(c.freq) ? c.freq : 'daily', interval_n: Math.min(52, Math.max(1, Math.round(+c.interval_n) || 1)),
+    out.custom = c ? JSON.stringify({ freq: ['daily', 'weekly', 'monthly'].includes(c.freq) ? c.freq : 'daily', interval_n: Math.min(366, Math.max(1, Math.round(+c.interval_n) || 1)),
       weekdays: String(c.weekdays || '').split(',').filter((x) => /^[0-6]$/.test(x)).join(',') || null,
       month_days: String(c.month_days || '').split(',').map(Number).filter((x) => x >= 1 && x <= 31).join(',') || null,
       times: String(c.times || '').split(',').map((x) => hhmm(x)).filter(Boolean).join(',') || null,
@@ -1301,7 +1401,7 @@ async function loadTasks(env, uid) {
 // Nag until done: hourly, daily at a time, or weekly on a day. Only for today's occurrences
 // (and a one-off task whose date has passed); snoozes and quiet hours are respected.
 async function sendTaskReminders(env, tz, local, quiet, now, uid) {
-  const { results } = await env.DB.prepare(`SELECT * FROM tasks WHERE archived = 0 AND nag = 1 AND kind NOT IN ('home', 'credit', 'meal')
+  const { results } = await env.DB.prepare(`SELECT * FROM tasks WHERE archived = 0 AND nag = 1 AND kind NOT IN ('task', 'home', 'credit', 'meal')
     AND ((remind_to IS NULL AND user_id = ?) OR remind_to = ? OR (remind_to = 0 AND (user_id = ? OR shared = 1)))`).bind(uid, uid, uid).all();
   if (!results.length) return [];
   const tasks = results.map(taskOut);
@@ -1384,14 +1484,13 @@ async function sendRewardsReminders(env, tz, local, now, uid) {
     const fee = RW.nextFee(ctx, c);
     if (fee && RW.daysLeft(ctx, fee) <= 31) {
       const when = `${RW.MONTHS[fee.getMonth()]} ${fee.getDate()}`;
-      stmts.push(env.DB.prepare(`INSERT OR IGNORE INTO items (title, notes, area, due_at, nag, source, external_id, user_id)
-        VALUES (?, ?, NULL, ?, 'daily', 'rewards', ?, ?)`).bind(`Keep or cancel ${c.name}? ${RW.money(c.fee)} fee on ${when}`,
-        `Value back this year: ${RW.money(RW.metrics(ctx, c, local.y).used)}. Downgrade or cancel before ${when} if it's not worth it.`, nine, `rwfee:${c.id}:${RW.ymd(fee)}`, uid));
+      await upsertTodo(env, `x:rwfee:${c.id}:${RW.ymd(fee)}`, { title: `Keep or cancel ${c.name}? ${RW.money(c.fee)} fee on ${when}`,
+        notes: `Value back this year: ${RW.money(RW.metrics(ctx, c, local.y).used)}. Downgrade or cancel before ${when} if it's not worth it.`, due_at: nine, nag: 'daily', source: 'rewards' }, uid, { onlyCreate: true });
     }
     for (const { b, x, days } of RW.certList(ctx, [c])) {
       if (!x.expires || x.virtual || days > 30 || days < 0) continue;
-      stmts.push(env.DB.prepare(`INSERT OR IGNORE INTO items (title, notes, area, due_at, nag, source, external_id, user_id)
-        VALUES (?, ?, 'travel', ?, 'daily', 'rewards', ?, ?)`).bind(`Use your ${b.name} (${c.name})`, `Expires ${x.expires}. Mark it used in Rewards once it's booked.`, nine, `rwcert:${c.id}:${x.id}`, uid));
+      await upsertTodo(env, `x:rwcert:${c.id}:${x.id}`, { title: `Use your ${b.name} (${c.name})`, notes: `Expires ${x.expires}. Mark it used in Rewards once it's booked.`,
+        area: 'travel', due_at: nine, nag: 'daily', source: 'rewards' }, uid, { onlyCreate: true });
     }
   }
   if (stmts.length) await env.DB.batch(stmts);
@@ -1423,10 +1522,11 @@ async function rwCard(env, id) {
 async function ensureBackupReminder(env, tz, local, uid, s) {
   if (s.last_backup_at && Date.now() - Date.parse(s.last_backup_at) < 30 * 86400000) return;
   const due = zonedToUtc(local.y, local.m, local.d, 9, 0, tz).toISOString();
-  await env.DB.prepare(`INSERT INTO items (title, notes, due_at, nag, source, external_id, user_id)
-      VALUES ('Download a Life backup', 'Settings › Backup › Download a backup. Save it to Files or iCloud Drive.', ?, 'once', 'backup', ?, ?)
-      ON CONFLICT(external_id) DO UPDATE SET status = 'open', done_at = NULL, due_at = excluded.due_at, notify_count = 0, last_notified_at = NULL
-      WHERE items.status = 'done'`).bind(due, `backup:${uid}`, uid).run();
+  const ref = `x:backup:${uid}`;
+  const prev = await todoRow(env, 'legacy_ref = ?', ref);
+  const open = prev && TK.todoOcc(prev, await todoLogs(env, prev.id), local.date);
+  if (prev && open && !open.log && !prev.archived) return; // still on the list
+  await upsertTodo(env, ref, { title: 'Download a Life backup', notes: 'Settings › Backup › Download a backup. Save it to Files or iCloud Drive.', due_at: due, nag: 'once', source: 'backup' }, uid, { reopen: true });
 }
 
 // ---------- Home reminders ----------
@@ -1485,9 +1585,8 @@ async function ensurePeopleReminders(env, tz, local, uid = 1) {
     if (d === null || d < 3 || d > 14) continue;
     const year = local.y + (Number(p.birthday.slice(-5, -3)) < local.m ? 1 : 0);
     const ideas = (await env.DB.prepare("SELECT idea FROM gifts WHERE person_id = ? AND status = 'idea' ORDER BY created_at DESC LIMIT 5").bind(p.id).all()).results.map((g) => g.idea);
-    stmts.push(env.DB.prepare(`INSERT OR IGNORE INTO items (title, notes, area, due_at, nag, person_id, source, external_id, user_id)
-      VALUES (?, ?, 'people', ?, 'daily', ?, 'gift', ?, ?)`).bind(`Pick a gift for ${p.name.split(' ')[0]}`,
-      ideas.length ? `Ideas: ${ideas.join(' · ')}` : 'No gift ideas saved yet. Add some on their page.', due, p.id, `gift:${p.id}:${year}`, uid));
+    await upsertTodo(env, `x:gift:${p.id}:${year}`, { title: `Pick a gift for ${p.name.split(' ')[0]}`, area: 'people', person_id: p.id, source: 'gift', nag: 'daily', due_at: due,
+      notes: ideas.length ? `Ideas: ${ideas.join(' · ')}` : 'No gift ideas saved yet. Add some on their page.' }, uid, { onlyCreate: true });
   }
   // (Important dates are tasks now.)
   if (stmts.length) await env.DB.batch(stmts);
@@ -1499,8 +1598,8 @@ async function sendWrapUp(env, tz, local, uid = 1) {
   const dayStart = zonedToUtc(local.y, local.m, local.d, 0, 0, tz).toISOString();
   const dayEnd = zonedToUtc(local.y, local.m, local.d, 23, 59, tz).toISOString();
   const [done, left, habits, habitDone] = await Promise.all([
-    env.DB.prepare('SELECT COUNT(*) AS n FROM items WHERE user_id = ? AND done_at >= ?').bind(uid, dayStart).first(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM items WHERE user_id = ? AND status = 'open' AND kind = 'task' AND due_at <= ?").bind(uid, dayEnd).first(),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM task_log l JOIN tasks t ON t.id = l.task_id WHERE t.kind = 'task' AND l.by_user = ? AND l.status = 'done' AND l.at >= ?").bind(uid, dayStart).first(),
+    openTodos(env, uid, local, tz, 'visible').then((list) => ({ n: list.filter((x) => x.t.user_id === uid && !(x.t.details && x.t.details.note) && x.due <= new Date(dayEnd)).length })),
     env.DB.prepare("SELECT COUNT(*) AS n FROM tasks WHERE user_id = ? AND kind = 'habit' AND archived = 0").bind(uid).first(),
     env.DB.prepare("SELECT COUNT(*) AS n FROM task_log l JOIN tasks t ON t.id = l.task_id WHERE t.user_id = ? AND t.kind = 'habit' AND l.occ = ? AND l.status IN ('done','partial')").bind(uid, local.date).first(),
   ]);
@@ -1535,8 +1634,8 @@ async function sendBriefing(env, tz, local, uid = 1) {
   const dayEnd = zonedToUtc(local.y, local.m, local.d, 23, 59, tz).toISOString();
   const [events, dueToday, nagging, people] = await Promise.all([
     visibleEvents(env, uid, dayStart, dayEnd).then((results) => ({ results })),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM items WHERE (user_id = ? OR shared = 1) AND status = 'open' AND due_at BETWEEN ? AND ?").bind(uid, dayStart, dayEnd).first(),
-    env.DB.prepare("SELECT COUNT(*) AS n FROM items WHERE user_id = ? AND status = 'open' AND nag IN ('hourly','15m','daily') AND due_at < ?").bind(uid, dayStart).first(),
+    openTodos(env, uid, local, tz, 'visible').then((list) => ({ n: list.filter((x) => x.o.date === local.date).length })),
+    openTodos(env, uid, local, tz).then((list) => ({ n: list.filter((x) => x.t.nag && x.o.date < local.date).length })),
     env.DB.prepare('SELECT * FROM people WHERE user_id = ? AND (birthday IS NOT NULL OR checkin_days IS NOT NULL)').bind(uid).all(),
   ]);
   const lines = [];

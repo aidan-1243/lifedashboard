@@ -119,3 +119,40 @@ export const describeNag = (t) => {
   if (t.nag_mode === 'weekly') return `${WEEKDAY_NAMES[t.nag_dow ?? 1]}s at ${fmtSlot(t.nag_time || '09:00')}`;
   return 'Hourly';
 };
+
+// Everyday tasks (kind "task"): the occurrence that's due now.
+//   One-off with a date: that date (late once it has passed, until done).
+//   One-off without a date: open until done; it's logged on the day you finish it.
+//   Repeating: the latest occurrence up to today that's after the last one you logged
+//   (older missed ones just count as missed), else the next one coming up.
+// Returns { date, time, key, log, late, future, undated } or null (nothing left).
+export function todoOcc(t, logs, today) {
+  const mine = logs.filter((l) => l.task_id === t.id).sort((a, z) => a.occ.localeCompare(z.occ));
+  const byOcc = new Map(mine.map((l) => [l.occ, l]));
+  if (!t.repeat || t.repeat === 'never') {
+    if (!t.date) { const l = mine[mine.length - 1] || null; return { date: null, time: '', key: l ? l.occ : today, log: l, late: false, future: false, undated: true }; }
+    const key = occKey(t.date, t.time || ''); const log = byOcc.get(key) || null;
+    return { date: t.date, time: t.time || '', key, log, late: !log && t.date < today, future: t.date > today };
+  }
+  const last = mine.length ? mine[mine.length - 1].occ : '';
+  // Walk back from today to the last logged occurrence (or the start, at most ~13 months)
+  for (let i = 0; i < 400; i++) {
+    const d = addDays(today, -i);
+    if ((t.date && d < t.date) || (last && d < last.slice(0, 10))) break;
+    const list = occurrencesOn(t, d);
+    for (let k = list.length - 1; k >= 0; k--) {
+      const key = occKey(d, list[k]);
+      if (key > last) {
+        // Today's later times aren't due yet: prefer the earliest open one today
+        if (d === today) { const first = list.find((tm) => occKey(d, tm) > last); return { date: d, time: first, key: occKey(d, first), log: null, late: false, future: false }; }
+        return { date: d, time: list[k], key, log: null, late: true, future: false };
+      }
+    }
+  }
+  // Nothing open up to today: the next one after today
+  for (let i = 1; i < 400; i++) {
+    const d = addDays(today, i); const list = occurrencesOn(t, d);
+    if (list.length) return { date: d, time: list[0], key: occKey(d, list[0]), log: null, late: false, future: true };
+  }
+  return null;
+}

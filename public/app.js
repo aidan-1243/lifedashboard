@@ -11,7 +11,7 @@ import * as TK from './tasks.js';
 
   const AREAS = { hoa: 'HOA', travel: 'Travel', people: 'People', home: 'Home', work: 'Work' };
   const NAGS = { none: 'No reminder', once: 'Remind once', daily: 'Daily till done', hourly: 'Hourly till done', '15m': 'Every 15 min till done' };
-  const NAG_SHORT = { daily: 'daily', hourly: 'hourly', '15m': 'every 15m' };
+  const NAG_SHORT = { daily: 'daily', hourly: 'hourly', weekly: 'weekly' };
   const REPEATS = (n) => ({ 1: 'every day', 7: 'every week', 14: 'every 2 weeks', 30: 'every month', 90: 'every 3 months', 365: 'every year' }[n] || `every ${n} days`);
   const CHECKINS = { '': 'Not tracked', 14: 'Every 2 weeks', 30: 'Every month', 60: 'Every 2 months', 90: 'Every 3 months', 180: 'Every 6 months', 365: 'Once a year' };
   const DAY = 86400000;
@@ -161,6 +161,7 @@ import * as TK from './tasks.js';
   async function refresh() {
     data = await api('/api/state');
     medsFromTasks();
+    itemsFromTasks();
     loaded = true;
     if (window.lifeTheme && data.settings && data.settings.weather_lat) window.lifeTheme.setLocation(data.settings.weather_lat, data.settings.weather_lon);
     if (window.lifeTheme && data.settings && data.settings.palette) window.lifeTheme.setPalette(data.settings.palette);
@@ -269,7 +270,7 @@ import * as TK from './tasks.js';
       parts.push(late ? `<span class="late">${esc(relDue(it.due_at))}</span>` : esc(relDue(it.due_at)));
     } else if (it.due_at && skipDue && hasTime(it.due_at)) parts.push(esc(fmtTime(it.due_at)));
     if (NAG_SHORT[it.nag]) parts.push(NAG_SHORT[it.nag]);
-    if (it.repeat_days) parts.push(REPEATS(it.repeat_days));
+    if (it.repeat && it.task) { parts.push(esc(TK.describeRepeat(it.task).toLowerCase())); const s = streakOf(it.task).current; if (s) parts.push(`${s} 🔥`); }
     if (it.source === 'wayfare') parts.push('Wayfare');
     const trip = it.trip_id && (data.trips || []).find((tr) => tr.id === it.trip_id);
     if (trip && it.source !== 'wayfare') parts.push(esc(trip.name));
@@ -474,7 +475,7 @@ import * as TK from './tasks.js';
 
     // Today's late block: overdue tasks (nagging ones first), then overdue Home tasks
     const lateRows = [
-      ...overdue.map((i) => { const [ic, cl] = itemIcon(i); return trow({ late: true, icon: ic, cls: cl, title: esc(i.title), meta: `${esc(overdueText(i.due_at))}${isNagging(i) ? ` · ${{ '15m': 'every 15 min', hourly: 'hourly', daily: 'daily' }[i.nag]}` : ''}${i.area ? ` · ${esc(AREAS[i.area] || '')}` : ''}`,
+      ...overdue.map((i) => { const [ic, cl] = itemIcon(i); return trow({ late: true, icon: ic, cls: cl, title: esc(i.title), meta: `${esc(overdueText(i.due_at))}${isNagging(i) ? ` · ${{ hourly: 'hourly', daily: 'daily', weekly: 'weekly' }[i.nag]}` : ''}${i.area ? ` · ${esc(AREAS[i.area] || '')}` : ''}`,
         open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `${i.source === 'wayfare' ? 'Booked' : 'Done'}: ${i.title}` },
         later: { attrs: `data-act="item-tomorrow" data-id="${i.id}" data-to="${tomorrowAt(i.due_at)}"`, label: 'Tomorrow' } }); }),
       ...homeTasks.filter((x) => x.i.k < 0).sort((a, b) => a.i.k - b.i.k).map(({ t, i }) => trow({ late: true, icon: 'home', cls: 'k-home', title: esc(t.name), meta: `Home · ${-i.k} day${i.k === -1 ? '' : 's'} late`,
@@ -625,6 +626,26 @@ import * as TK from './tasks.js';
       .map((l) => ({ med_id: l.task_id, date: l.occ.slice(0, 10), slot: l.occ.slice(11), status: l.status === 'skipped' ? 'skipped' : 'taken', taken_at: l.at }));
   }
 
+  // Everyday tasks are tasks (kind "task"). Today, All, trips and search still read data.items, so
+  // build those in the old item shape. due_at = the occurrence due now (9:00 means "no time").
+  function itemsFromTasks() {
+    const today = todayYmd(), dayAgo = Date.now() - DAY, logs = data.task_log || [];
+    data.items = (data.tasks || []).filter((t) => t.kind === 'task' && !t.archived).map((t) => {
+      const d = t.details || {}; const o = TK.todoOcc(t, logs, today);
+      const oneOff = !t.repeat || t.repeat === 'never';
+      const done = !o || (oneOff && !!o.log);
+      let due = null;
+      if (o && o.date) { const x = parseDay(o.date); const [h, m] = (o.time || '09:00').split(':').map(Number); x.setHours(h, m, 0, 0); due = x.toISOString(); }
+      const last = logs.filter((l) => l.task_id === t.id).sort((a, z) => z.at.localeCompare(a.at))[0];
+      return { id: t.id, task: t, title: t.title, notes: d.notes || null, area: d.area || null, kind: d.note ? 'note' : 'task', due_at: due,
+        nag: t.nag ? t.nag_mode : d.silent ? 'none' : 'once', repeat: oneOff ? null : t.repeat, top3: d.top3 ? 1 : 0, person_id: d.person_id || null,
+        status: done ? 'done' : 'open', snooze_until: t.snooze_until, source: d.source || 'manual',
+        external_id: (t.legacy_ref || '').startsWith('x:') ? t.legacy_ref.replace(/^x:(u\d+:)?/, '') : null,
+        created_at: t.created_at, done_at: done && last ? last.at : null, user_id: t.user_id, shared: t.shared, trip_id: d.trip_id || null };
+    }).filter((i) => i.status === 'open' || (i.done_at && Date.parse(i.done_at) > dayAgo) || i.trip_id)
+      .sort((a, z) => (!a.due_at - !z.due_at) || String(a.due_at).localeCompare(String(z.due_at)));
+  }
+
   // ---------- tasks (the one task model; see docs/tasks-design.md) ----------
   const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const myHabits = () => (data.tasks || []).filter((t) => t.kind === 'habit' && (!data.me || t.user_id === data.me.id));
@@ -651,6 +672,7 @@ import * as TK from './tasks.js';
   // or the next one coming up.
   function taskOcc(t) {
     const today = todayYmd();
+    if (t.kind === 'task') return TK.todoOcc(t, data.task_log || [], today);
     const logs = new Map(taskLog(t).map((l) => [l.occ, l]));
     const list = TK.occurrencesOn(t, today).map((tm) => ({ date: today, time: tm, key: TK.occKey(today, tm) }));
     if (list.length) { const o = list.find((x) => !logs.get(x.key)) || list[list.length - 1]; return { ...o, log: logs.get(o.key) || null }; }
@@ -682,7 +704,8 @@ import * as TK from './tasks.js';
     const isPeople = PEOPLE_KINDS.includes(t.kind);
     const person = isPeople && details.person_id ? data.people.find((x) => x.id === details.person_id) : null;
     const done = occ && occ.log && occ.log.status !== 'skipped';
-    const status = isNew ? '' : !t.date ? 'No date' : occ ? `${occ.future ? 'Next: ' : ''}${dayLabel(occ.date)}${occ.time ? ` ${fmtSlot(occ.time)}` : ''}${done ? ' · done' : occ.log ? ' · skipped' : ''}` : 'Finished';
+    const mainLabel = details.source === 'wayfare' ? 'Booked' : TASK_MAIN[t.kind] || 'Done';
+    const status = isNew ? '' : !t.date ? (done ? 'No date · done' : 'No date') : occ ? `${occ.future ? 'Next: ' : occ.late ? 'Late · ' : ''}${dayLabel(occ.date)}${occ.time ? ` ${fmtSlot(occ.time)}` : ''}${done ? ' · done' : occ.log ? ' · skipped' : ''}` : 'Finished';
     // Custom repeat uses the same chip picker as medications
     const cst = medState({ id: t.repeat === 'custom' ? 1 : 0, ...(t.repeat === 'custom' && t.custom ? { freq: t.custom.freq, interval_n: t.custom.interval_n, weekdays: t.custom.weekdays, month_days: t.custom.month_days, times: t.custom.times || t.time || '08:00', dose_times: t.custom.dose_times ? JSON.stringify(t.custom.dose_times) : null } : { times: t.time || '08:00' }), start_date: t.date || todayYmd() });
     const users = data.users || [];
@@ -697,7 +720,7 @@ import * as TK from './tasks.js';
         <div class="tk-title"><h3>${isNew ? `New ${TASK_NOUN[t.kind] || 'task'}` : esc(t.title)}${!isNew && details.dose ? ` <span class="tk-dose">${esc(details.dose)}</span>` : ''}</h3>${status ? `<p class="sub">${esc(status)}</p>` : ''}</div>
         ${isNew ? '' : flame(st.current)}</div>
       ${isNew || !occ ? '' : `<div class="tk-main">
-        ${done ? `<button type="button" class="btn ok big" data-tk="undo">✓ ${esc(TASK_MAIN[t.kind] || 'Done')} · Undo</button>` : `<button type="button" class="btn dark big" data-tk="done">${esc(TASK_MAIN[t.kind] || 'Done')}</button>`}
+        ${done ? `<button type="button" class="btn ok big" data-tk="undo">✓ ${esc(mainLabel)} · Undo</button>` : `<button type="button" class="btn dark big" data-tk="done">${esc(mainLabel)}</button>`}
         ${done ? '' : t.kind === 'catchup' ? '<div class="btns2"><button type="button" class="btn ghost" data-tk="snooze7">Not now (1 week)</button></div>' : `<div class="btns2"><button type="button" class="btn ghost" data-tk="skip">${t.kind === 'med' ? 'Skip this dose' : `Skip${occ.future ? '' : ' this time'}`}</button>${t.nag ? '<button type="button" class="btn ghost" data-tk="snooze">Snooze 1h</button>' : ''}</div>`}
       </div>`}
       ${isPeople ? `<div class="lbl">Details</div>
@@ -718,8 +741,13 @@ import * as TK from './tasks.js';
       <div class="tk-group">
         <label class="tk-row tk-in"><span>Name</span><input name="title" value="${esc(t.title || '')}" required maxlength="120" placeholder="${{ habit: 'Workout', med: 'Vitamin D' }[t.kind] || 'Call the plumber'}"></label>
         ${t.kind === 'med' ? `<label class="tk-row tk-in"><span>Dose</span><input name="dose" value="${esc(details.dose || '')}" maxlength="60" placeholder="10 mg"></label>` : ''}
-        <label class="tk-row tk-in"><span>Notes</span><input name="notes" value="${esc(details.notes || '')}" maxlength="300" placeholder="Optional"></label>
+        <label class="tk-row tk-in"><span>Notes</span><input name="notes" value="${esc(details.notes || '')}" maxlength="${t.kind === 'task' ? 2000 : 300}" placeholder="Optional"></label>
+        ${t.kind === 'task' ? `<label class="tk-row"><span>Area</span><select name="area">${opt([['', 'None'], ...Object.entries(AREAS)], details.area || '')}</select></label>
+        ${data.people.length ? `<label class="tk-row"><span>Person</span><select name="person_id">${opt([['', 'None'], ...data.people.slice(0, 2000).map((p) => [p.id, p.name])], details.person_id || '')}</select></label>` : ''}
+        ${(data.trips || []).length || details.trip_id ? `<label class="tk-row"><span>Trip</span><select name="trip_id">${opt([['', 'None'], ...(data.trips || []).map((tr) => [tr.id, tr.name])], details.trip_id || '')}</select></label>` : ''}
+        ${sw('top3', !!details.top3, 'Top 3 today')}` : ''}
       </div>
+      ${t.kind === 'task' && !isNew && occ && !done ? '<div class="btns2 tk-focus"><button type="button" class="pbtn" data-focus-min="25">Focus 25 min</button><button type="button" class="pbtn" data-focus-min="50">Focus 50 min</button></div>' : ''}
       `}${isPeople ? '' : `<div class="lbl">Schedule</div>
       <div class="tk-group">
         ${sw('has_date', !!t.date, `${kindMark('calendar')} Date`)}
@@ -732,6 +760,7 @@ import * as TK from './tasks.js';
       <div class="lbl">Reminders</div>
       <div class="tk-group">
         ${sw('nag', !!t.nag, 'Nag until done')}
+        ${t.kind === 'task' ? `<p class="hint tk-hint" data-tkshow="nagoff">${details.silent ? 'Off: no alerts.' : 'Off: one alert when it’s due.'}</p>` : ''}
         <label class="tk-row tk-sub" data-tkshow="nag"><span>How often</span><select name="nag_mode">${opt([['hourly', 'Hourly'], ['daily', 'Daily'], ['weekly', 'Weekly']], t.nag_mode || 'hourly')}</select></label>
         <label class="tk-row tk-sub" data-tkshow="nagday"><span>On</span><select name="nag_dow">${opt(WEEKDAY_NAMES.map((d, i) => [i, d]), t.nag_dow ?? 1)}</select></label>
         <label class="tk-row tk-sub" data-tkshow="nagtime"><span>At</span><input type="time" name="nag_time" value="${esc(t.nag_time || '09:00')}"></label>
@@ -751,7 +780,7 @@ import * as TK from './tasks.js';
     const show = () => {
       const has = (n) => form[n] && form[n].checked;
       const vis = { date: has('has_date'), time: has('has_date') && has('has_time') && form.repeat.value !== 'custom', custom: has('has_date') && form.repeat.value === 'custom',
-        nag: has('nag'), nagday: has('nag') && form.nag_mode.value === 'weekly', nagtime: has('nag') && form.nag_mode.value !== 'hourly' };
+        nag: has('nag'), nagoff: !has('nag') && has('has_date'), nagday: has('nag') && form.nag_mode.value === 'weekly', nagtime: has('nag') && form.nag_mode.value !== 'hourly' };
       form.querySelectorAll('[data-tkshow]').forEach((el) => { el.hidden = !vis[el.dataset.tkshow]; });
       const tr = form.querySelector('label.tk-row:has([name="has_time"])'); if (tr) tr.hidden = !vis.date || form.repeat.value === 'custom';
     };
@@ -778,6 +807,7 @@ import * as TK from './tasks.js';
         else if (a === 'remove') { if (!confirm(`Remove "${t.title}"? Its history is kept in backups.`)) return; await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Removed'); }
       } catch (err) { toast(err.message); }
     }; });
+    form.querySelectorAll('[data-focus-min]').forEach((b) => { b.onclick = async () => { sheet.close(); await startFocus(t.id, +b.dataset.focusMin); }; });
     form.querySelectorAll('[data-tkdel]').forEach((b) => { b.onclick = async () => {
       try { await api(`/api/tasks/${t.id}/log`, { body: { occ: b.dataset.tkdel, status: 'undo' } }); await refresh(); openTask(taskById(t.id)); } catch (err) { toast(err.message); }
     }; });
@@ -786,7 +816,8 @@ import * as TK from './tasks.js';
       const f = new FormData(form);
       const hasDate = !!form.has_date.checked, repeat = hasDate ? f.get('repeat') : 'never';
       if (t.kind === 'med' && (!hasDate || (repeat !== 'custom' && !form.has_time.checked))) { toast('Medications need a date and a time'); return; }
-      const body = { kind: t.kind, title: f.get('title').trim(), details: { ...details, notes: f.get('notes').trim() || undefined, ...(f.has('dose') ? { dose: f.get('dose').trim() || undefined } : {}) },
+      const body = { kind: t.kind, title: f.get('title').trim(), details: { ...details, notes: f.get('notes').trim() || undefined, ...(f.has('dose') ? { dose: f.get('dose').trim() || undefined } : {}),
+        ...(t.kind === 'task' ? { area: f.get('area') || undefined, person_id: +f.get('person_id') || undefined, trip_id: f.has('trip_id') ? +f.get('trip_id') || undefined : details.trip_id, top3: form.top3.checked ? 1 : undefined } : {}) },
         date: hasDate ? f.get('date') : null, time: hasDate && form.has_time.checked && repeat !== 'custom' ? f.get('time') : null, repeat, custom: null,
         nag: form.nag.checked ? 1 : 0, nag_mode: f.get('nag_mode'), nag_time: f.get('nag_time'), nag_dow: +f.get('nag_dow') };
       if (f.has('remind_to')) body.remind_to = f.get('remind_to') === '' ? null : +f.get('remind_to');
@@ -1118,8 +1149,8 @@ import * as TK from './tasks.js';
 
   // ---------- recent actions (undo history, kept on this device) ----------
   let history = [];
-  try { history = JSON.parse(localStorage.getItem('life_history') || '[]').filter((h) => Date.now() - h.at < 3 * DAY); } catch (_) { /* ignore */ }
-  const saveHistory = () => { try { localStorage.setItem('life_history', JSON.stringify(history.slice(0, 20))); } catch (_) { /* ignore */ } };
+  try { history = JSON.parse(localStorage.getItem('life_history2') || '[]').filter((h) => Date.now() - h.at < 3 * DAY); } catch (_) { /* ignore */ }
+  const saveHistory = () => { try { localStorage.setItem('life_history2', JSON.stringify(history.slice(0, 20))); } catch (_) { /* ignore */ } };
   // Record something you did, with what's needed to reverse it. Returns an undo function for the toast.
   function remember(label, undo) {
     const entry = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, at: Date.now(), label, undo, undone: false };
@@ -1372,13 +1403,13 @@ import * as TK from './tasks.js';
       const [kind, id] = b.dataset.open.split(/:(.+)/);
       const n = +id;
       if (kind === 'event') openEvent(data.events.find((x) => x.id === n));
-      else if (kind === 'item') openItem(data.items.find((x) => x.id === n));
+      else if (kind === 'item') { const t = taskById(n); if (t) openTask(t); }
       else if (kind === 'med') { const t = taskById(n); if (t) openTask(t); }
       else if (kind === 'home') openHomeTask(data.home_tasks.find((x) => x.id === n));
       else if (kind === 'person') openPerson(data.people.find((x) => x.id === n));
       else if (kind === 'trip') openTrip(data.trips.find((x) => x.id === n));
       else if (kind === 'meal') openMeal(id);
-      else if (kind === 'new') { const due = parseDay(id); due.setHours(9, 0, 0, 0); openItem({ title: '', kind: 'task', nag: 'once', due_at: due.toISOString() }); }
+      else if (kind === 'new') openTask({ kind: 'task', date: id });
     }; });
     showSheet();
   }
@@ -2349,69 +2380,6 @@ import * as TK from './tasks.js';
 
   // ---------- sheets ----------
 
-  function openItem(it) {
-    const toLocalInput = (iso) => { if (!iso) return ''; const d = new Date(iso); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
-    const opt = (obj, sel) => Object.entries(obj).map(([k, v]) => `<option value="${k}"${String(sel ?? '') === k ? ' selected' : ''}>${v}</option>`).join('');
-    const people = data.people.slice(0, 2000).map((p) => `<option value="${p.id}"${it.person_id === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
-    sheet.innerHTML = `<form method="dialog" id="item-form">
-      <h3>${it.id ? 'Edit' : 'New'}</h3>
-      <label class="field"><span>Title</span><input name="title" value="${esc(it.title)}" required></label>
-      <div class="two">
-        <label class="field"><span>Area</span><select name="area"><option value="">None</option>${opt(AREAS, it.area)}</select></label>
-        <label class="field"><span>Type</span><select name="kind">${opt({ task: 'Task', note: 'Note' }, it.kind)}</select></label>
-      </div>
-      <label class="field"><span>Due</span><input type="datetime-local" name="due_at" value="${toLocalInput(it.due_at)}"></label>
-      <div class="two">
-        <label class="field"><span>Reminder</span><select name="nag">${opt(NAGS, it.nag)}</select></label>
-        <label class="field"><span>Repeats every (days)</span><input type="number" min="1" name="repeat_days" value="${it.repeat_days ?? ''}" placeholder="No"></label>
-      </div>
-      <label class="field"><span>Person</span><select name="person_id"><option value="">None</option>${people}</select></label>
-      ${(data.trips || []).length ? `<label class="field"><span>Trip</span><select name="trip_id"><option value="">None</option>${data.trips.map((tr) => `<option value="${tr.id}"${it.trip_id === tr.id ? ' selected' : ''}>${esc(tr.name)} (${esc(fmtRange(tr.start_date, tr.end_date))})</option>`).join('')}</select></label>` : ''}
-      <label class="field"><span>Notes</span><textarea name="notes">${esc(it.notes)}</textarea></label>
-      <label class="inline"><input type="checkbox" name="top3"${it.top3 ? ' checked' : ''}> Top 3 today</label>
-      ${others().length ? `<label class="inline"><input type="checkbox" name="shared"${it.shared ? ' checked' : ''}> Shared with ${esc(others().map((u) => u.name).join(', '))}</label>
-      ${it.shared && it.user_id && data.me && it.user_id !== data.me.id ? `<p class="hint">${esc(personName(it.user_id))} added this, so reminders go to their phone.</p>` : ''}` : ''}
-      ${it.id && it.status === 'open' ? `<div class="btns"><button type="button" class="pbtn" data-focus-min="25">Focus 25 min</button><button type="button" class="pbtn" data-focus-min="50">Focus 50 min</button></div>` : ''}
-      <div class="actions">
-        ${it.id ? '<button type="button" class="btn danger" data-sheet="delete">Delete</button>' : ''}
-        <span class="grow"></span>
-        <button type="button" class="btn ghost" data-sheet="close">Cancel</button>
-        <button type="submit" class="btn dark">Save</button>
-      </div>
-    </form>`;
-    const form = sheet.querySelector('form');
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      const f = new FormData(form);
-      const body = {
-        title: f.get('title').trim(), area: f.get('area') || null, kind: f.get('kind'), nag: f.get('nag'),
-        due_at: f.get('due_at') ? new Date(f.get('due_at')).toISOString() : null,
-        repeat_days: f.get('repeat_days') ? +f.get('repeat_days') : null,
-        person_id: f.get('person_id') ? +f.get('person_id') : null,
-        notes: f.get('notes').trim() || null, top3: f.get('top3') ? 1 : 0,
-      };
-      if (f.has('trip_id')) body.trip_id = f.get('trip_id') ? +f.get('trip_id') : null;
-      if (others().length) body.shared = f.get('shared') ? 1 : 0;
-      try {
-        if (it.id) await api(`/api/items/${it.id}`, { method: 'PATCH', body });
-        else await api('/api/items', { body });
-        sheet.close();
-        await refresh();
-        toast('Saved');
-      } catch (err) { toast(err.message); }
-    };
-    form.querySelector('[data-sheet="close"]').onclick = () => sheet.close();
-    form.querySelectorAll('[data-focus-min]').forEach((b) => { b.onclick = async () => { sheet.close(); await startFocus(it.id, +b.dataset.focusMin); }; });
-    const del = form.querySelector('[data-sheet="delete"]');
-    if (del) del.onclick = async () => {
-      if (!confirm(`Delete "${it.title}"?`)) return;
-      await api(`/api/items/${it.id}`, { method: 'DELETE' });
-      sheet.close();
-      await refresh();
-    };
-    showSheet();
-  }
-
   // Settings for a synced calendar event. Saved by title (all of them) or for
   // just this one, so they survive every calendar sync.
   function openEvent(e) {
@@ -2506,7 +2474,7 @@ import * as TK from './tasks.js';
       <div class="actions"><span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Close</button></div>
     </form>`;
     const form = sheet.querySelector('form');
-    form.querySelector('[data-tg="add"]').onclick = () => openItem({ title: '', area: 'travel', nag: 'daily', trip_id: trip.id, status: 'open' });
+    form.querySelector('[data-tg="add"]').onclick = () => openTask({ kind: 'task', nag: 1, nag_mode: 'daily', details: { area: 'travel', trip_id: trip.id } });
     form.querySelector('[data-tg="edit"]').onclick = () => openTrip(trip);
     // Rows inside the trip: check off, reopen, or open a task or event
     form.addEventListener('click', async (e) => {
@@ -2515,7 +2483,7 @@ import * as TK from './tasks.js';
       try {
         if (act === 'done') { (el.closest('.row') || el).classList.add('completing'); await new Promise((r) => setTimeout(r, 260)); await markDone(id); openTripGroup(data.trips.find((x) => x.id === trip.id)); }
         else if (act === 'reopen') { await api(`/api/items/${id}`, { method: 'PATCH', body: { status: 'open' } }); await refresh(); openTripGroup(data.trips.find((x) => x.id === trip.id)); }
-        else if (act === 'edit') openItem(data.items.find((i) => i.id === id));
+        else if (act === 'edit') { const t = taskById(id); if (t) openTask(t); }
         else if (act === 'event') openEvent(data.events.find((x) => x.id === id));
       } catch (err) { toast(err.message); }
     });
@@ -3013,7 +2981,7 @@ import * as TK from './tasks.js';
         const undo = remember(`Logged: talked to ${p.name}`, { k: 'contact', id, prev: { last_contact_at: p.last_contact_at || null, last_contact_how: p.last_contact_how || null } });
         await refresh();
         toast(`Logged: talked to ${p.name.split(' ')[0]}`, undo);
-      } else if (act === 'edit') openItem(data.items.find((i) => i.id === id));
+      } else if (act === 'edit') { const t = taskById(id); if (t) openTask(t); }
       else if (act === 'person') openPerson(data.people.find((p) => p.id === id));
       else if (act === 'new-person') openPerson({ name: '' });
       else if (act === 'doc') openDocument(data.documents.find((d) => d.id === id));
@@ -3037,7 +3005,7 @@ import * as TK from './tasks.js';
         try { localStorage.setItem('life_collapsed', JSON.stringify([...collapsed])); } catch (_) { /* ignore */ }
         render();
       } else if (act === 'setup-hide') { try { localStorage.setItem('life_setup_hidden', '1'); } catch (_) { /* ignore */ } render(); }
-      else if (act === 'new-item') openItem({ title: '', kind: 'task', nag: 'once' });
+      else if (act === 'new-item') openTask({ kind: 'task', date: null });
       else if (act === 'jump') document.getElementById(el.dataset.to)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       else if (act === 'meal-open') openMeal(el.dataset.date);
       else if (act === 'go-meals') location.hash = '#meals';
