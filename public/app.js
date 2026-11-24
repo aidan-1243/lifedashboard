@@ -2818,20 +2818,67 @@ import * as TK from './tasks.js';
     showSheet();
   }
 
-  // Birthday uses the phone's own date picker. "No year" keeps just the month and day
-  // (saved as --MM-DD); the picker then holds the year 2000, which allows Feb 29.
+  // Birthday: Apple-style wheels (Month, Day, Year) that open under the row, like Contacts.
+  // The Year wheel starts with "No year"; that saves --MM-DD.
+  const MONTHS = Array.from({ length: 12 }, (_, i) => new Date(2000, i, 1).toLocaleDateString([], { month: 'long' }));
+  const WHEEL_ROW = 36;
+  function bdayParts(v) {
+    let m;
+    if ((m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || ''))) return { y: +m[1], mo: +m[2], d: +m[3] };
+    if ((m = /^--(\d{2})-(\d{2})$/.exec(v || ''))) return { y: 0, mo: +m[1], d: +m[2] };
+    return null;
+  }
+  const bdayText = (v) => { const b = bdayParts(v); return b ? `${MONTHS[b.mo - 1]} ${b.d}${b.y ? `, ${b.y}` : ''}` : 'Add'; };
   function bdayPicker(v) {
-    let date = '', noYear = false, m;
-    if ((m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || ''))) date = m[0];
-    else if ((m = /^--(\d{2})-(\d{2})$/.exec(v || ''))) { date = `2000-${m[1]}-${m[2]}`; noYear = true; }
-    return `<label class="tk-row tk-in"><span>Birthday</span><input type="date" name="bday_date" value="${date}" max="${todayYmd()}" aria-label="Birthday"></label>
-        <label class="tk-row"><span>No year</span><input type="checkbox" class="tk-switch" name="bday_noyear"${noYear ? ' checked' : ''}></label>`;
+    return `<button type="button" class="tk-row bday-row" data-bday aria-expanded="false"><span>Birthday</span><span class="meta bday-txt">${esc(bdayText(v))}</span></button>
+        <input type="hidden" name="birthday" value="${esc(v || '')}">
+        <div class="wheels" hidden>
+          <div class="wheel" data-w="mo" aria-label="Month"></div><div class="wheel" data-w="d" aria-label="Day"></div><div class="wheel" data-w="y" aria-label="Year"></div>
+          <i class="wheel-band" aria-hidden="true"></i>
+          <button type="button" class="link wheel-clear" data-bday-clear>Remove birthday</button>
+        </div>`;
   }
-  function bdayValue(form) {
-    const v = form.querySelector('[name="bday_date"]').value;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
-    return form.querySelector('[name="bday_noyear"]').checked ? `--${v.slice(5)}` : v;
+  function bindBdayPicker(form) {
+    const row = form.querySelector('[data-bday]'); if (!row) return;
+    const box = form.querySelector('.wheels'), out = form.querySelector('[name="birthday"]'), txt = row.querySelector('.bday-txt');
+    const thisYear = new Date().getFullYear();
+    const lists = { mo: MONTHS, d: Array.from({ length: 31 }, (_, i) => String(i + 1)), y: ['No year', ...Array.from({ length: thisYear - 1899 }, (_, i) => String(thisYear - i))] };
+    const cur = bdayParts(out.value) || { y: 0, mo: new Date().getMonth() + 1, d: new Date().getDate() };
+    const idx = { mo: cur.mo - 1, d: cur.d - 1, y: cur.y ? thisYear - cur.y + 1 : 0 };
+    const wheels = {};
+    const daysIn = () => (idx.y ? new Date(thisYear - idx.y + 1, idx.mo + 1, 0).getDate() : [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][idx.mo]);
+    const write = () => {
+      const md = `${String(idx.mo + 1).padStart(2, '0')}-${String(idx.d + 1).padStart(2, '0')}`;
+      out.value = idx.y ? `${thisYear - idx.y + 1}-${md}` : `--${md}`;
+      txt.textContent = bdayText(out.value);
+    };
+    const mark = (k) => wheels[k].querySelectorAll('.wi').forEach((el, i) => { el.classList.toggle('on', i === idx[k]); el.classList.toggle('off', k === 'd' && i >= daysIn()); });
+    for (const k of ['mo', 'd', 'y']) {
+      const w = box.querySelector(`[data-w="${k}"]`); wheels[k] = w;
+      w.innerHTML = `<div class="wpad"></div>${lists[k].map((t) => `<div class="wi">${esc(t)}</div>`).join('')}<div class="wpad"></div>`;
+      let timer;
+      w.addEventListener('scroll', () => {
+        const i = Math.max(0, Math.min(lists[k].length - 1, Math.round(w.scrollTop / WHEEL_ROW)));
+        if (i !== idx[k]) { idx[k] = i; mark(k); }
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          // Days follow the month and year (Feb 29 only in leap years, or with no year)
+          if (idx.d >= daysIn()) { idx.d = daysIn() - 1; wheels.d.scrollTo({ top: idx.d * WHEEL_ROW, behavior: 'smooth' }); }
+          mark('d'); write();
+        }, 120);
+      }, { passive: true });
+      w.querySelectorAll('.wi').forEach((el, i) => { el.onclick = () => w.scrollTo({ top: i * WHEEL_ROW, behavior: 'smooth' }); });
+    }
+    row.onclick = () => {
+      box.hidden = !box.hidden; row.setAttribute('aria-expanded', String(!box.hidden));
+      if (!box.hidden) {
+        for (const k of ['mo', 'd', 'y']) { wheels[k].scrollTop = idx[k] * WHEEL_ROW; mark(k); }
+        if (!out.value) write();
+      }
+    };
+    box.querySelector('[data-bday-clear]').onclick = () => { out.value = ''; txt.textContent = 'Add'; box.hidden = true; row.setAttribute('aria-expanded', 'false'); };
   }
+  function bdayValue(form) { return form.querySelector('[name="birthday"]').value || null; }
 
   function openPersonEdit(p) {
     const isNew = !p.id;
@@ -2874,6 +2921,7 @@ import * as TK from './tasks.js';
       try { await api(`/api/people/${p.id}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Deleted'); } catch (err) { toast(err.message); }
     };
     if (!isNew) bindPersonExtras(form, p, datesHtml);
+    bindBdayPicker(form);
     showSheet();
   }
 

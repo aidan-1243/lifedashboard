@@ -1143,3 +1143,18 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 #person-edit #p-extras { display: flex; flex-direction: column; gap: 8px; }
 a.tk-row.tk-link { text-decoration: none; color: inherit; }
 
+
+/* Birthday wheels (Apple-style): three snapping columns with a highlight band */
+.bday-row { width: 100%; border: 0; background: none; font: inherit; color: var(--fg); text-align: left; }
+.bday-row[aria-expanded="true"] .bday-txt { color: var(--accent-ink); }
+.wheels { position: relative; display: grid; grid-template-columns: 1.6fr .7fr 1.1fr; border-top: 1px solid var(--line); }
+.wheels[hidden] { display: none; }
+.wheel { overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none; -webkit-overflow-scrolling: touch; height: 180px; position: relative; z-index: 1;
+  -webkit-mask-image: linear-gradient(transparent, #000 35%, #000 65%, transparent); mask-image: linear-gradient(transparent, #000 35%, #000 65%, transparent); }
+.wheel::-webkit-scrollbar { display: none; }
+.wpad { height: 72px; }
+.wi { height: 36px; line-height: 36px; text-align: center; scroll-snap-align: center; font-size: 19px; color: var(--muted); cursor: pointer; -webkit-user-select: none; user-select: none; }
+.wi.on { color: var(--fg); }
+.wi.off { color: var(--line); }
+.wheel-band { position: absolute; left: 8px; right: 8px; top: 72px; height: 36px; border-radius: 9px; background: var(--soft); pointer-events: none; }
+.wheel-clear { grid-column: 1 / -1; justify-self: center; font-size: 13px; padding: 6px 0 10px; }
