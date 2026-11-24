@@ -1142,3 +1142,4 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 #person-edit .addrow input { min-width: 0; }
 #person-edit #p-extras { display: flex; flex-direction: column; gap: 8px; }
 a.tk-row.tk-link { text-decoration: none; color: inherit; }
+

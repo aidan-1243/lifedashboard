@@ -2818,6 +2818,21 @@ import * as TK from './tasks.js';
     showSheet();
   }
 
+  // Birthday uses the phone's own date picker. "No year" keeps just the month and day
+  // (saved as --MM-DD); the picker then holds the year 2000, which allows Feb 29.
+  function bdayPicker(v) {
+    let date = '', noYear = false, m;
+    if ((m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v || ''))) date = m[0];
+    else if ((m = /^--(\d{2})-(\d{2})$/.exec(v || ''))) { date = `2000-${m[1]}-${m[2]}`; noYear = true; }
+    return `<label class="tk-row tk-in"><span>Birthday</span><input type="date" name="bday_date" value="${date}" max="${todayYmd()}" aria-label="Birthday"></label>
+        <label class="tk-row"><span>No year</span><input type="checkbox" class="tk-switch" name="bday_noyear"${noYear ? ' checked' : ''}></label>`;
+  }
+  function bdayValue(form) {
+    const v = form.querySelector('[name="bday_date"]').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+    return form.querySelector('[name="bday_noyear"]').checked ? `--${v.slice(5)}` : v;
+  }
+
   function openPersonEdit(p) {
     const isNew = !p.id;
     const opt = Object.entries(CHECKINS).map(([k, v]) => `<option value="${k}"${String(p.checkin_days ?? '') === k ? ' selected' : ''}>${v}</option>`).join('');
@@ -2825,7 +2840,7 @@ import * as TK from './tasks.js';
       <h3>${isNew ? 'New person' : `Edit ${esc(p.name.split(' ')[0])}`}</h3>
       <div class="tk-group">
         <label class="tk-row tk-in"><span>Name</span><input name="name" value="${esc(p.name || '')}" required maxlength="120"></label>
-        <label class="tk-row tk-in"><span>Birthday</span><input name="birthday" value="${esc(p.birthday || '')}" placeholder="1990-12-01 or --12-01"></label>
+        ${bdayPicker(p.birthday)}
         <label class="tk-row"><span>Check in</span><select name="checkin_days">${opt}</select></label>
         <label class="tk-row"><span>Circle</span><select name="circle"><option value="">None</option>${Object.entries(CIRCLES).map(([k, v]) => `<option value="${k}"${p.circle === k ? ' selected' : ''}>${v}</option>`).join('')}</select></label>
       </div>
@@ -2845,7 +2860,7 @@ import * as TK from './tasks.js';
     form.onsubmit = async (e) => {
       e.preventDefault();
       const f = new FormData(form);
-      const body = { name: f.get('name').trim(), birthday: f.get('birthday').trim() || null, checkin_days: f.get('checkin_days') ? +f.get('checkin_days') : null, notes: f.get('notes').trim() || null, bday_notify: f.get('bday_notify') ? 1 : 0, circle: f.get('circle') || null };
+      const body = { name: f.get('name').trim(), birthday: bdayValue(form), checkin_days: f.get('checkin_days') ? +f.get('checkin_days') : null, notes: f.get('notes').trim() || null, bday_notify: f.get('bday_notify') ? 1 : 0, circle: f.get('circle') || null };
       try {
         const r = isNew ? await api('/api/people', { body }) : await api(`/api/people/${p.id}`, { method: 'PATCH', body });
         await refresh();
