@@ -496,7 +496,7 @@ async function handleApi(req, env, url, ctx, uid) {
     await syncPeopleTasks(env, uid, created.id);
     return json(created, 201);
   }
-  if ((m = /^\/api\/people\/(\d+)(\/contact)?$/.exec(path)) && !(await owns(env, 'people', +m[1], uid))) return notYours();
+  if ((m = /^\/api\/people\/(\d+)(\/contact(?:\/\d+)?)?$/.exec(path)) && !(await owns(env, 'people', +m[1], uid))) return notYours();
   if ((m = /^\/api\/people\/(\d+)$/.exec(path))) {
     if (method === 'PATCH') { const r = await updateRow(env, 'people', +m[1], pick(body, PERSON_FIELDS)); await syncPeopleTasks(env, uid, +m[1]); return json(r); }
     if (method === 'DELETE') {
@@ -506,16 +506,40 @@ async function handleApi(req, env, url, ctx, uid) {
     }
   }
   if ((m = /^\/api\/people\/(\d+)\/contact$/.exec(path)) && method === 'POST') {
-    const at = nowIso();
-    const how = (body && body.how) || 'talked';
-    await env.DB.prepare('INSERT INTO contact_log (person_id, how, at) VALUES (?, ?, ?)').bind(+m[1], how, at).run();
-    const r = await updateRow(env, 'people', +m[1], { last_contact_at: at, last_contact_how: how });
-    // The catch-up task: log it done today, then move it to the next check-in date
+    // A talk today, or on an earlier day you forgot to log (up to a year back; `date` is YYYY-MM-DD local).
+    const tz = env.TZ || 'America/Chicago';
+    const today = localParts(new Date(), tz).date;
+    const date = body && /^\d{4}-\d{2}-\d{2}$/.test(body.date || '') ? body.date : today;
+    if (date > today) return json({ error: 'That day hasn’t happened yet' }, 400);
+    if (date < new Date(Date.now() - 366 * 864e5).toISOString().slice(0, 10)) return json({ error: 'Pick a day within the last year' }, 400);
+    const at = date === today ? nowIso() : `${date}T18:00:00.000Z`; // midday local, so the day stays put
+    const how = String((body && body.how) || 'talked').slice(0, 20);
+    const log = await env.DB.prepare('INSERT INTO contact_log (person_id, how, at) VALUES (?, ?, ?) RETURNING id').bind(+m[1], how, at).first();
+    // Only a newer talk moves "last contact" (and so the next catch-up date)
+    const prev = await env.DB.prepare('SELECT * FROM people WHERE id = ?').bind(+m[1]).first();
+    const r = !prev.last_contact_at || at > prev.last_contact_at ? await updateRow(env, 'people', +m[1], { last_contact_at: at, last_contact_how: how }) : prev;
+    // The catch-up task: log that day done, then move it to the next check-in date
     const t = await env.DB.prepare("SELECT id FROM tasks WHERE legacy_ref = ?").bind(`catchup:${+m[1]}`).first();
     if (t) await env.DB.prepare(`INSERT INTO task_log (task_id, occ, status, at, by_user) VALUES (?, ?, 'done', ?, ?)
-      ON CONFLICT(task_id, occ) DO UPDATE SET status = 'done', at = excluded.at`).bind(t.id, localParts(new Date(), env.TZ || 'America/Chicago').date, at, uid).run();
+      ON CONFLICT(task_id, occ) DO UPDATE SET status = 'done', at = excluded.at`).bind(t.id, date, at, uid).run();
     await syncPeopleTasks(env, uid, +m[1]);
-    return json(r);
+    return json({ ...r, log_id: log.id, date });
+  }
+  if ((m = /^\/api\/people\/(\d+)\/contact\/(\d+)$/.exec(path)) && method === 'DELETE') {
+    // Undo a logged talk: remove it, recompute "last contact", and drop that day from the catch-up
+    // history unless another talk is logged the same day.
+    const tz = env.TZ || 'America/Chicago';
+    const row = await env.DB.prepare('SELECT * FROM contact_log WHERE id = ? AND person_id = ?').bind(+m[2], +m[1]).first();
+    if (!row) return json({ ok: true });
+    await env.DB.prepare('DELETE FROM contact_log WHERE id = ?').bind(row.id).run();
+    const day = localParts(new Date(row.at), tz).date;
+    const rest = (await env.DB.prepare('SELECT how, at FROM contact_log WHERE person_id = ? ORDER BY at DESC').bind(+m[1]).all()).results;
+    await updateRow(env, 'people', +m[1], { last_contact_at: rest[0] ? rest[0].at : null, last_contact_how: rest[0] ? rest[0].how : null });
+    if (!rest.some((x) => localParts(new Date(x.at), tz).date === day)) {
+      await env.DB.prepare("DELETE FROM task_log WHERE occ = ? AND task_id = (SELECT id FROM tasks WHERE legacy_ref = ?)").bind(day, `catchup:${+m[1]}`).run();
+    }
+    await syncPeopleTasks(env, uid, +m[1]);
+    return json({ ok: true });
   }
 
   // Quick capture from Siri / Apple Watch: plain text in, a spoken-friendly summary out.

@@ -677,6 +677,9 @@ import * as TK from './tasks.js';
     const list = TK.occurrencesOn(t, today).map((tm) => ({ date: today, time: tm, key: TK.occKey(today, tm) }));
     if (list.length) { const o = list.find((x) => !logs.get(x.key)) || list[list.length - 1]; return { ...o, log: logs.get(o.key) || null }; }
     if ((!t.repeat || t.repeat === 'never') && t.date) { const key = TK.occKey(t.date, t.time || ''); return { date: t.date, time: t.time || '', key, log: logs.get(key) || null }; }
+    if (t.kind === 'birthday' || t.kind === 'pdate') {
+      for (let i = 1; i <= 3; i++) { const d = TK.addDays(today, -i); if (TK.isDueOn(t, d)) { const key = TK.occKey(d, ''); if (!logs.get(key)) return { date: d, time: '', key, log: null, late: true }; break; } }
+    }
     const next = t.date ? TK.nextDate(t, today) : null;
     if (!next) return null;
     const tm = TK.occurrencesOn(t, next)[0] || '';
@@ -723,6 +726,7 @@ import * as TK from './tasks.js';
         ${done ? `<button type="button" class="btn ok big" data-tk="undo">✓ ${esc(mainLabel)} · Undo</button>` : `<button type="button" class="btn dark big" data-tk="done">${esc(mainLabel)}</button>`}
         ${done ? '' : t.kind === 'catchup' ? '<div class="btns2"><button type="button" class="btn ghost" data-tk="snooze7">Not now (1 week)</button></div>' : `<div class="btns2"><button type="button" class="btn ghost" data-tk="skip">${t.kind === 'med' ? 'Skip this dose' : `Skip${occ.future ? '' : ' this time'}`}</button>${t.nag ? '<button type="button" class="btn ghost" data-tk="snooze">Snooze 1h</button>' : ''}</div>`}
       </div>`}
+      ${t.kind === 'catchup' && person ? `<div class="btns2 tk-focus"><button type="button" class="pbtn" data-talk-earlier aria-expanded="false">Talked on an earlier day…</button></div>${earlierPicker()}` : ''}
       ${isPeople ? `<div class="lbl">Details</div>
       <div class="tk-group">
         <button type="button" class="tk-row tk-link" data-tk="person"><span>${kindMark('heart')} ${esc(person ? person.name : 'Person')}</span><span class="meta">Open ›</span></button>
@@ -794,10 +798,11 @@ import * as TK from './tasks.js';
     drawCustom(); bindMedPicker(form.querySelector('.tk-custom'), cst, drawCustom);
     form.addEventListener('change', (e) => { if (['has_date', 'has_time', 'repeat', 'nag', 'nag_mode'].includes(e.target.name)) show(); });
     show();
+    if (t.kind === 'catchup' && person) bindEarlier(form, person, () => sheet.close());
     form.querySelectorAll('[data-tk]').forEach((b) => { b.onclick = async () => {
       const a = b.dataset.tk;
       try {
-        if (a === 'done' && t.kind === 'catchup') { sheet.close(); await api(`/api/people/${details.person_id}/contact`, { body: { how: 'talked' } }); await refresh(); toast(`Logged. Next catch-up ${dayLabel((taskById(t.id) || t).date)}`); }
+        if (a === 'done' && t.kind === 'catchup') { sheet.close(); await logTalk(person || { id: details.person_id, name: details.first || 'them' }, 'talked'); }
         else if (a === 'done' || a === 'skip') { sheet.close(); await taskDo(t, a === 'done' ? 'done' : 'skipped', occ); }
         else if (a === 'undo') { await taskDo(t, 'undo', occ); openTask(taskById(t.id)); }
         else if (a === 'snooze') { await api(`/api/tasks/${t.id}/snooze`, { body: { minutes: 60 } }); sheet.close(); await refresh(); toast('Snoozed 1 hour'); }
@@ -1152,6 +1157,31 @@ import * as TK from './tasks.js';
   try { history = JSON.parse(localStorage.getItem('life_history2') || '[]').filter((h) => Date.now() - h.at < 3 * DAY); } catch (_) { /* ignore */ }
   const saveHistory = () => { try { localStorage.setItem('life_history2', JSON.stringify(history.slice(0, 20))); } catch (_) { /* ignore */ } };
   // Record something you did, with what's needed to reverse it. Returns an undo function for the toast.
+  // Log a talk with someone, today or on an earlier day you forgot. Undo removes that exact entry.
+  async function logTalk(p, how = 'talked', date = null) {
+    const r = await api(`/api/people/${p.id}/contact`, { body: { how, ...(date ? { date } : {}) } });
+    const first = p.name.split(' ')[0];
+    const when = date && date !== todayYmd() ? ` (${dayLabel(date)})` : '';
+    const label = `${{ talked: 'Talked to', called: 'Called', texted: 'Texted', saw: 'Saw' }[how] || 'Talked to'} ${first}${when}`;
+    const undo = remember(`Logged: ${label}`, { k: 'contact', id: p.id, log: r.log_id });
+    await refresh();
+    toast(`Logged: ${label}`, undo);
+  }
+  const earlierPicker = () => `<div class="talk-earlier" hidden><div class="tk-group">
+      <label class="tk-row tk-in"><span>Day</span><input type="date" name="talk_date" max="${TK.addDays(todayYmd(), -1)}" min="${TK.addDays(todayYmd(), -365)}" value="${TK.addDays(todayYmd(), -1)}"></label>
+      <label class="tk-row"><span>How</span><select name="talk_how"><option value="talked">Talked</option><option value="called">Called</option><option value="texted">Texted</option><option value="saw">Saw them</option></select></label></div>
+      <div class="btns2" style="margin-top:8px"><button type="button" class="btn dark" data-talk-log>Log it</button></div></div>`;
+  function bindEarlier(root, p, after) {
+    const box = root.querySelector('.talk-earlier'), open = root.querySelector('[data-talk-earlier]');
+    if (!box || !open) return;
+    open.onclick = () => { box.hidden = !box.hidden; open.setAttribute('aria-expanded', String(!box.hidden)); };
+    box.querySelector('[data-talk-log]').onclick = async () => {
+      const d = box.querySelector('[name="talk_date"]').value;
+      if (!d || d > todayYmd()) { toast('Pick a day up to today'); return; }
+      try { if (after) after(); await logTalk(p, box.querySelector('[name="talk_how"]').value, d); } catch (err) { toast(err.message); }
+    };
+  }
+
   function remember(label, undo) {
     const entry = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, at: Date.now(), label, undo, undone: false };
     history.unshift(entry); history = history.slice(0, 20); saveHistory();
@@ -1171,7 +1201,7 @@ import * as TK from './tasks.js';
       else if (u.k === 'habit') await api(`/api/tasks/${u.id}/log`, { body: { occ: u.occ, status: u.was ? 'done' : 'undo' } });
       else if (u.k === 'med') await api(`/api/tasks/${u.id}/log`, { body: { occ: `${u.date} ${u.slot}`, status: 'undo' } });
       else if (u.k === 'meal-eaten') await api(`/api/meals/${u.date}/eaten`, { body: { eaten: 0 } });
-      else if (u.k === 'contact') await api(`/api/people/${u.id}`, { method: 'PATCH', body: u.prev });
+      else if (u.k === 'contact') await (u.log ? api(`/api/people/${u.id}/contact/${u.log}`, { method: 'DELETE' }) : api(`/api/people/${u.id}`, { method: 'PATCH', body: u.prev }));
       e.undone = true; saveHistory();
       await refresh();
       toast(`Undone: ${e.label}`);
@@ -2653,7 +2683,8 @@ import * as TK from './tasks.js';
         <button type="button" class="pbtn" data-log="called">Called ✓</button>
         <button type="button" class="pbtn" data-log="texted">Texted ✓</button>
         <button type="button" class="pbtn" data-log="saw">Saw them ✓</button>
-      </div>` : '<h3>New person</h3>'}
+        <button type="button" class="pbtn" data-talk-earlier aria-expanded="false">Earlier day…</button>
+      </div>${earlierPicker()}` : '<h3>New person</h3>'}
       <label class="field"><span>Name</span><input name="name" value="${esc(p.name)}" required></label>
       <div class="two">
         <label class="field"><span>Birthday</span><input name="birthday" value="${esc(p.birthday)}" placeholder="YYYY-MM-DD or --MM-DD"></label>
@@ -2700,13 +2731,11 @@ import * as TK from './tasks.js';
     if (p.id) bindPersonExtras(form, p);
     form.querySelectorAll('[data-log]').forEach((btn) => {
       btn.onclick = async () => {
-        await api(`/api/people/${p.id}/contact`, { body: { how: btn.dataset.log } });
-        const undo = remember(`Logged: ${btn.dataset.log} ${p.name}`, { k: 'contact', id: p.id, prev: { last_contact_at: p.last_contact_at || null, last_contact_how: p.last_contact_how || null } });
         sheet.close();
-        toast(`Logged: ${btn.dataset.log} ${p.name.split(' ')[0]}`, undo);
-        await refresh();
+        await logTalk(p, btn.dataset.log);
       };
     });
+    if (p.id) bindEarlier(form, p, () => sheet.close());
     showSheet();
   }
 
@@ -2977,10 +3006,7 @@ import * as TK from './tasks.js';
         await refresh();
       } else if (act === 'talked') {
         const p = data.people.find((x) => x.id === id);
-        await api(`/api/people/${id}/contact`, { body: { how: 'talked' } });
-        const undo = remember(`Logged: talked to ${p.name}`, { k: 'contact', id, prev: { last_contact_at: p.last_contact_at || null, last_contact_how: p.last_contact_how || null } });
-        await refresh();
-        toast(`Logged: talked to ${p.name.split(' ')[0]}`, undo);
+        await logTalk(p, 'talked');
       } else if (act === 'edit') { const t = taskById(id); if (t) openTask(t); }
       else if (act === 'person') openPerson(data.people.find((p) => p.id === id));
       else if (act === 'new-person') openPerson({ name: '' });
