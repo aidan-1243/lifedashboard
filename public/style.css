@@ -1183,3 +1183,14 @@ a.tk-row.tk-link { text-decoration: none; color: inherit; }
 .add-kind .evmark { width: 40px; height: 40px; border-radius: 12px; }
 .add-kind .evmark svg { width: 21px; height: 21px; }
 .add-kind:active { opacity: .7; }
+/* Today rows (option F): a 36px tile leads every row; timed rows show their time in it */
+:root { --bday: #B83268; --bday-bg: #FCE2EE; --fest-bg: #FFF0D2; }
+:root[data-theme="night"] { --bday: #F5A3C7; --bday-bg: #43182C; --fest-bg: #3A2C12; }
+.trow .evmark { width: 36px; height: 36px; border-radius: 11px; }
+.trow .evmark svg { width: 18px; height: 18px; }
+.evmark.tile { flex-direction: column; font-size: 12px; font-weight: 800; line-height: 1.05; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.evmark.tile small { font-size: 9px; font-weight: 600; letter-spacing: 0; opacity: .85; }
+.evmark.tile:not([class*=" k-"]):not(.fest):not(.late-tile) { background: var(--a-hoa-bg); color: var(--a-hoa); }
+.evmark.fest { background: var(--fest-bg); font-size: 20px; }
+.evmark.late-tile { background: color-mix(in srgb, var(--late) 16%, var(--card)); color: var(--late); font-size: 11px; }
+.evmark.k-bday { background: var(--bday-bg); color: var(--bday); }

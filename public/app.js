@@ -365,6 +365,25 @@ import * as TK from './tasks.js';
   // Lists drop the empty time column when nothing in them has a time; Today keeps it so every day lines up
   // The left time column: "All day" stacks as All / day so it fits like a time
   const whenHtml = (w) => (w === 'All day' ? 'All<br>day' : esc(w));
+  // Today and the day view lead each row with a tile: timed and all-day items show their time
+  // ("7:30 pm", "All day"), US holidays a festive emoji, everything else its icon.
+  const timeTile = (when, cls = '') => {
+    let body;
+    if (when === 'All day') body = 'All<small>day</small>';
+    else {
+      const m = /^(\d{1,2})(?::(\d{2}))?([ap])$/.exec(when || '');
+      body = m ? `${m[1]}:${m[2] || '00'}<small>${m[3]}m</small>` : esc(when);
+    }
+    return `<span class="evmark tile ${cls}" aria-hidden="true">${body}</span>`;
+  };
+  // Apple's US Holidays calendar: a little cheer instead of "All day" (others keep All day)
+  const FESTIVE = [[/new year.?s eve/i, '🥂'], [/new year.?s day|^new year/i, '🎉'], [/lunar new year/i, '🧧'], [/valentine/i, '💝'],
+    [/st\.? patrick/i, '🍀'], [/easter/i, '🐰'], [/cinco de mayo/i, '🪅'], [/mother.?s day/i, '💐'], [/father.?s day/i, '👔'],
+    [/memorial day|presidents.? day|veterans day|flag day|labor day/i, '🇺🇸'], [/independence day|fourth of july|july 4/i, '🎆'], [/juneteenth/i, '🎉'],
+    [/halloween/i, '🎃'], [/thanksgiving/i, '🦃'], [/christmas eve/i, '🎄'], [/christmas/i, '🎅'], [/hanukkah|chanukah/i, '🕎'], [/kwanzaa/i, '🕯️'],
+    [/diwali/i, '🪔'], [/earth day/i, '🌎'], [/groundhog/i, '🦫']];
+  const festiveFor = (e) => (e && e.all_day && /holiday/i.test(e.calendar || '') ? (FESTIVE.find(([re]) => re.test(e.title)) || [])[1] || null : null);
+  const festTile = (emoji) => `<span class="evmark tile fest" aria-hidden="true">${emoji}</span>`;
   const listCard = (rows, { keepWhen = false } = {}) => { const timed = keepWhen || rows.some((r) => /class="when">\s*[^<\s]/.test(r));
     return `<div class="card${timed ? '' : ' no-when'}"><ul class="list">${rows.join('')}</ul></div>`; };
   // Sections can fold away (remembered on this device) and carry a quick "+" button.
@@ -420,11 +439,10 @@ import * as TK from './tasks.js';
     // Today: late first, then things with no time, then by the clock. The rest of the week: by day,
     // same order inside each day. Each row: time · icon · title/detail · check (or × for all-day events).
     // Swipe right = the check button; swipe left = the row's "later" action (shown on the swipe)
-    const trow = ({ when = '', icon, cls = '', title, meta = '', open, done, dismiss, late = false, later }) => {
+    const trow = ({ when = '', icon, cls = '', title, meta = '', open, done, dismiss, late = false, later, fest = null }) => {
       const swipe = done || later;
       return `<li class="row trow${late ? ' late-row' : ''}${swipe ? ' sw' : ''}"${swipe ? ` data-swipe="row" data-kind="trow" data-later="${esc(later ? later.label : 'Later')}"` : ''}><div class="row-inner">
-      <span class="when">${late ? '<span class="late">Late</span>' : whenHtml(when)}</span>
-${kindMark(icon, cls)}
+      ${late ? '<span class="evmark tile late-tile" aria-hidden="true">Late</span>' : fest ? festTile(fest) : when ? timeTile(when, cls) : kindMark(icon, cls)}
       <button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
       ${done ? `<button type="button" class="check tcheck" ${done.attrs} aria-label="${esc(done.label)}"></button>` : ''}
       ${dismiss ? `<button type="button" class="tx" ${dismiss} aria-label="Hide for today">×</button>` : ''}
@@ -432,7 +450,7 @@ ${kindMark(icon, cls)}
     };
     const tomorrowAt = (iso) => { const d = new Date(iso); const t = new Date(+sod + DAY); t.setHours(hasTime(iso) ? d.getHours() : 9, hasTime(iso) ? d.getMinutes() : 0, 0, 0); return t.toISOString(); };
     const at = (d, hhmm) => { const [hh, mm] = hhmm.split(':').map(Number); const x = parseDay(d); x.setHours(hh, mm, 0, 0); return +x; };
-    const KIND_ORDER = { late: 0, birthday: 1, pdate: 2, credit: 3, event: 4, home: 5, habit: 6, item: 7 };
+    const KIND_ORDER = { late: 0, holiday: 0.5, birthday: 1, pdate: 2, credit: 3, event: 4, home: 5, habit: 6, item: 7 };
     const itemIcon = (i) => (i.trip_id || i.source === 'wayfare' ? ['suitcase', 'k-trip'] : ['check', 'k-task']);
     const homeTasks = (data.home_tasks || []).map((t) => ({ t, i: homeInfo(t) })).filter((x) => !x.i.completed); // snoozed ones show on their new due day
     const myCreditsOpen = (() => { if (!data.rewards || !data.me) return []; const ctx = rwCtx(); return RW.openCredits(ctx, ctx.cards.filter((c) => c.owner === data.me.id)).filter((x) => x.dated); })();
@@ -446,8 +464,9 @@ ${kindMark(icon, cls)}
         if (isToday && !e.all_day && new Date(e.end_at || e.start_at) <= now) continue;
         if (!isToday && new Date(e.start_at) < d0) continue; // multi-day events show on their first day
         const keep = (data.event_prefs || []).find((r) => r.key === e.one) || {};
-        out.push({ k: 'event', at: e.all_day ? null : Date.parse(e.start_at), html: trow({ when: e.all_day ? 'All day' : fmtShortTime(e.start_at), icon: 'calendar', cls: 'k-event', title: esc(e.title),
-          meta: [e.all_day ? '' : `${esc(fmtTime(e.start_at))}${e.end_at ? `–${esc(fmtTime(e.end_at))}` : ''}`, e.location ? esc(shortLoc(e.location)) : '', e.pref && e.pref.note ? esc(e.pref.note) : ''].filter(Boolean).join('<br>'),
+        const fest = festiveFor(e);
+        out.push({ k: fest ? 'holiday' : 'event', at: e.all_day ? null : Date.parse(e.start_at), html: trow({ when: e.all_day ? 'All day' : fmtShortTime(e.start_at), fest, icon: 'calendar', cls: 'k-event', title: esc(e.title),
+          meta: [fest ? 'Holiday' : e.all_day ? '' : `${esc(fmtTime(e.start_at))}${e.end_at ? `–${esc(fmtTime(e.end_at))}` : ''}`, e.location ? esc(shortLoc(e.location)) : '', e.pref && e.pref.note ? esc(e.pref.note) : ''].filter(Boolean).join('<br>'),
           open: `data-act="event" data-id="${e.id}"`, dismiss: e.all_day && isToday ? `data-act="ev-hide" data-key="${esc(e.one)}" data-keep='${esc(JSON.stringify({ note: keep.note || null, label: keep.label || e.title }))}'` : null }) });
       }
       // Tasks due this day (overdue ones are in Today's late block)
@@ -483,9 +502,9 @@ ${kindMark(icon, cls)}
       for (const t of peopleTasks.filter((t) => TK.isDueOn(t, D))) {
         if (taskLog(t).some((l) => l.occ === D)) continue;
         const yrs = /^\d{4}/.test(t.date) && !t.date.startsWith('2000') ? +D.slice(0, 4) - +t.date.slice(0, 4) : null;
-        out.push({ k: t.kind, at: null, html: trow({ icon: t.kind === 'birthday' ? 'balloon' : 'heart', cls: 'k-people', title: esc(t.title),
+        out.push({ k: t.kind, at: null, html: trow({ icon: t.kind === 'birthday' ? 'balloon' : 'heart', cls: t.kind === 'birthday' ? 'k-bday' : 'k-people', title: esc(t.title),
           meta: t.kind === 'birthday' ? `Birthday${yrs ? ` · turns ${yrs}` : ''}` : `Important date${yrs ? ` · ${yrs} years` : ''}`,
-          open: `data-act="task-open" data-id="${t.id}"`, done: isToday ? { attrs: `data-act="task-done" data-id="${t.id}" data-occ="${D}"`, label: t.kind === 'birthday' ? `Wished them: ${t.title}` : `Done: ${t.title}` } : null,
+          open: `data-act="task-open" data-id="${t.id}"`, done: { attrs: `data-act="task-done" data-id="${t.id}" data-occ="${D}"`, label: t.kind === 'birthday' ? `Wished them: ${t.title}` : `Done: ${t.title}` },
           later: isToday ? { attrs: `data-act="task-skip" data-id="${t.id}" data-occ="${D}"`, label: 'Hide' } : null }) });
       }
       // Credits: on the day they run out
@@ -1448,10 +1467,10 @@ ${kindMark(icon, cls)}
     const mmdd = date.slice(5);
     const rows = [];
     // Rows are sorted at the end: all-day and untimed first, then by time of day
-    const row = (when, title, meta, open, at = null) => rows.push({ at, html: `<li class="row"><span class="when">${whenHtml(when)}</span>${kindMark({ event: 'calendar', med: 'pill', home: 'home', trip: 'suitcase', person: /birthday/i.test(title) ? 'balloon' : 'heart', item: 'calendar' }[open.split(':')[0]] || 'calendar', { med: 'k-med', person: 'k-people', home: 'k-home', trip: 'k-travel' }[open.split(':')[0]] || '')}<button type="button" class="row-main" data-open="${esc(open)}"><div class="t">${esc(title)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>` });
+    const row = (when, title, meta, open, at = null, fest = null) => rows.push({ at, html: `<li class="row trow">${fest ? festTile(fest) : when ? timeTile(when, { event: 'k-event', med: 'k-med', item: 'k-task' }[open.split(':')[0]] || '') : kindMark({ event: 'calendar', med: 'pill', home: 'home', trip: 'suitcase', person: /birthday/i.test(title) ? 'balloon' : 'heart', item: 'calendar' }[open.split(':')[0]] || 'calendar', { med: 'k-med', person: /birthday/i.test(title) ? 'k-bday' : 'k-people', home: 'k-home', trip: 'k-travel' }[open.split(':')[0]] || '')}<button type="button" class="row-main" data-open="${esc(open)}"><div class="t">${esc(title)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>` });
     const evs = data.events.filter((e) => !(e.pref && e.pref.hidden) && !birthdayEventPerson(e.title, data.people) && new Date(e.start_at) < d1 && (e.end_at ? new Date(e.end_at) > d0 : new Date(e.start_at) >= d0))
       .sort((a, b) => (a.all_day - b.all_day) || (Date.parse(a.start_at) - Date.parse(b.start_at)));
-    for (const e of evs) row(e.all_day ? 'All day' : fmtShortTime(e.start_at), e.title, placeLines('Calendar', e), `event:${e.id}`, e.all_day ? null : Math.max(+d0, Date.parse(e.start_at)));
+    for (const e of evs) { const fest = festiveFor(e); row(e.all_day ? 'All day' : fmtShortTime(e.start_at), e.title, fest ? 'Holiday' : placeLines('Calendar', e), `event:${e.id}`, e.all_day ? null : Math.max(+d0, Date.parse(e.start_at)), fest); }
     for (const t of data.items.filter((i) => i.status === 'open' && i.due_at && new Date(i.due_at) >= d0 && new Date(i.due_at) < d1)) row(hasTime(t.due_at) ? fmtShortTime(t.due_at) : '', t.title, itemMeta(t, { skipDue: true }), `item:${t.id}`, hasTime(t.due_at) ? Date.parse(t.due_at) : null);
     for (const m of (data.meds || []).filter((x) => medDueOn(x, date))) { for (const slot of slotsOn(m, date)) { const [hh, mm] = slot.split(':').map(Number); const t0 = new Date(d0); t0.setHours(hh, mm, 0, 0); row(fmtSlot(slot), m.name, `Medication${m.dose ? ` · ${esc(m.dose)}` : ''}`, `med:${m.id}`, +t0); } }
     for (const h of (data.home_tasks || []).filter((t) => homeInfo(t).due === date)) row('', h.name, `Home · ${esc(h.room || '')}`, `home:${h.id}`);
