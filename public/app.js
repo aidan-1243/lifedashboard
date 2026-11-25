@@ -73,8 +73,8 @@ import * as TK from './tasks.js';
   const okToClose = () => !sheetDirty() || confirm('Discard your changes?');
   sheet.tabIndex = -1;
   // Typing marks the sheet unsaved (gift ideas / dates save instantly, so they don't count)
-  sheet.addEventListener('input', (e) => { if (!e.target.closest('#p-extras') && e.target.type !== 'search') sheet.dataset.dirty = '1'; });
-  sheet.addEventListener('change', (e) => { if (!e.target.closest('#p-extras') && e.target.type !== 'search' && e.target.type !== 'file') sheet.dataset.dirty = '1'; });
+  sheet.addEventListener('input', (e) => { if (!e.target.closest('#p-extras, .med-earlier') && e.target.type !== 'search') sheet.dataset.dirty = '1'; });
+  sheet.addEventListener('change', (e) => { if (!e.target.closest('#p-extras, .med-earlier') && e.target.type !== 'search' && e.target.type !== 'file') sheet.dataset.dirty = '1'; });
   sheet.addEventListener('submit', () => { sheet.dataset.dirty = ''; }, true);
   sheet.addEventListener('close', () => { sheet.dataset.dirty = ''; if (!sheet.open) unlockPage(); }); // (fires late: another sheet may already be open)
   // Cancel / Close / × buttons: confirm before throwing away typing
@@ -421,7 +421,12 @@ import * as TK from './tasks.js';
     const name = (data.settings.name || '').trim();
     const todayEvents = eventsOn(sod, eod);
     const eventsLeft = todayEvents.filter((e) => e.all_day || new Date(e.end_at || e.start_at) > now).length;
-    const summary = [overdue.length ? `${plural(overdue.length, 'thing')} need${overdue.length === 1 ? 's' : ''} you` : 'Nothing overdue',
+    // Doses from yesterday that were never logged (taken late at night, or missed): log or skip them today
+    const yday = TK.addDays(todayYmd(), -1);
+    const ydayLogged = new Set((data.med_logs || []).filter((l) => l.date === yday).map((l) => `${l.med_id}|${l.slot}`));
+    const missedDoses = (data.meds || []).flatMap((m) => slotsOn(m, yday).filter((slot) => !ydayLogged.has(`${m.id}|${slot}`)).map((slot) => ({ m, slot })));
+    const needs = overdue.length + missedDoses.length;
+    const summary = [needs ? `${plural(needs, 'thing')} need${needs === 1 ? 's' : ''} you` : 'Nothing overdue',
       eventsLeft ? `${plural(eventsLeft, 'event')} left today` : 'no more events today'].join(' · ');
 
     // week strip
@@ -526,6 +531,10 @@ import * as TK from './tasks.js';
 
     // Today's late block: overdue tasks (nagging ones first), then overdue Home tasks
     const lateRows = [
+      ...missedDoses.map(({ m, slot }) => trow({ late: true, icon: 'pill', cls: 'k-med', title: `${esc(m.name)}${m.dose ? ` <span class="tdim">${esc(m.dose)}</span>` : ''}`,
+        meta: `Not logged · yesterday ${esc(fmtSlot(slot))}`, open: `data-act="med-open" data-id="${m.id}"`,
+        done: { attrs: `data-act="med-take" data-id="${m.id}" data-slot="${slot}" data-date="${yday}"`, label: `Took it yesterday: ${m.name}` },
+        later: { attrs: `data-act="med-skip" data-id="${m.id}" data-slot="${slot}" data-date="${yday}"`, label: 'Missed it' } })),
       ...overdue.map((i) => { const [ic, cl] = itemIcon(i); return trow({ late: true, icon: ic, cls: cl, title: esc(i.title), meta: `${esc(overdueText(i.due_at))}${isNagging(i) ? ` · ${{ hourly: 'hourly', daily: 'daily', weekly: 'weekly' }[i.nag]}` : ''}${i.area ? ` · ${esc(AREAS[i.area] || '')}` : ''}`,
         open: `data-act="edit" data-id="${i.id}"`, done: { attrs: `data-act="done" data-id="${i.id}"`, label: `${i.source === 'wayfare' ? 'Booked' : 'Done'}: ${i.title}` },
         later: { attrs: `data-act="item-tomorrow" data-id="${i.id}" data-to="${tomorrowAt(i.due_at)}"`, label: 'Tomorrow' } }); }),
@@ -773,6 +782,12 @@ import * as TK from './tasks.js';
         ${done ? `<button type="button" class="btn ok big" data-tk="undo">✓ ${esc(mainLabel)} · Undo</button>` : `<button type="button" class="btn dark big" data-tk="done">${esc(mainLabel)}</button>`}
         ${done ? '' : t.kind === 'catchup' ? '<div class="btns2"><button type="button" class="btn ghost" data-tk="snooze7">Not now (1 week)</button></div>' : `<div class="btns2"><button type="button" class="btn ghost" data-tk="skip">${t.kind === 'med' ? 'Skip this dose' : `Skip${occ.future ? '' : ' this time'}`}</button>${t.nag ? '<button type="button" class="btn ghost" data-tk="snooze">Snooze 1h</button>' : ''}</div>`}
       </div>`}
+      ${t.kind === 'med' && !isNew ? `<div class="btns2 tk-focus"><button type="button" class="pbtn" data-med-earlier aria-expanded="false">Took a dose on an earlier day…</button></div>
+      <div class="tk-group med-earlier" hidden>
+        <label class="tk-row"><span>Day</span><select name="me_day"></select></label>
+        <label class="tk-row"><span>Dose</span><select name="me_slot"></select></label>
+        <div class="tk-row" style="justify-content:flex-end"><button type="button" class="btn dark" data-med-log>Log as taken</button></div>
+      </div>` : ''}
       ${t.kind === 'catchup' && person ? `<div class="btns2 tk-focus"><button type="button" class="pbtn" data-talk-earlier aria-expanded="false">Talked on an earlier day…</button></div>${earlierPicker()}` : ''}
       ${isPeople ? `<div class="lbl">Details</div>
       <div class="tk-group">
@@ -846,6 +861,27 @@ import * as TK from './tasks.js';
     form.addEventListener('change', (e) => { if (['has_date', 'has_time', 'repeat', 'nag', 'nag_mode'].includes(e.target.name)) show(); });
     show();
     if (t.kind === 'catchup' && person) bindEarlier(form, person, () => sheet.close());
+    // Earlier dose: the last 7 days that had a dose scheduled, then that day's dose times
+    const earlyBtn = form.querySelector('[data-med-earlier]');
+    if (earlyBtn) {
+      const box = form.querySelector('.med-earlier'), daySel = form.me_day, slotSel = form.me_slot;
+      const med = (data.meds || []).find((x) => x.id === t.id);
+      const days = med ? Array.from({ length: 7 }, (_, i) => TK.addDays(todayYmd(), -(i + 1))).filter((d) => slotsOn(med, d).length) : [];
+      const logged = (d, slot) => (data.med_logs || []).find((l) => l.med_id === t.id && l.date === d && l.slot === slot);
+      const fillSlots = () => { const d = daySel.value; slotSel.innerHTML = (med ? slotsOn(med, d) : []).map((slot) => { const l = logged(d, slot);
+        return `<option value="${slot}">${esc(fmtSlot(slot))}${l ? ` · already ${l.status === 'skipped' ? 'skipped' : 'taken'}` : ''}</option>`; }).join('');
+        const open1 = (med ? slotsOn(med, d) : []).find((slot) => !logged(d, slot)); if (open1) slotSel.value = open1; }; // start on the first dose not logged yet
+      daySel.innerHTML = days.map((d, i) => `<option value="${d}">${i === 0 && d === TK.addDays(todayYmd(), -1) ? 'Yesterday' : esc(parseDay(d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }))}</option>`).join('');
+      if (!days.length) { earlyBtn.disabled = true; earlyBtn.textContent = 'No doses scheduled in the last week'; }
+      else fillSlots();
+      daySel.onchange = fillSlots;
+      earlyBtn.onclick = () => { box.hidden = !box.hidden; earlyBtn.setAttribute('aria-expanded', String(!box.hidden)); };
+      form.querySelector('[data-med-log]').onclick = async () => {
+        if (!daySel.value || !slotSel.value) return;
+        sheet.dataset.dirty = ''; sheet.close();
+        await logMed(t.id, slotSel.value, 'taken', daySel.value).catch((err) => toast(err.message));
+      };
+    }
     form.querySelectorAll('[data-tk]').forEach((b) => { b.onclick = async () => {
       const a = b.dataset.tk;
       try {
@@ -1547,14 +1583,17 @@ import * as TK from './tasks.js';
       }).join('')}</ul></div>`}</section>`;
   }
 
-  async function logMed(id, slot, status = 'taken') {
+  // Log a dose: today's by default, or an earlier day's (a dose taken late at night and logged the next day)
+  async function logMed(id, slot, status = 'taken', date = todayYmd()) {
     const m = (data.meds || []).find((x) => x.id === id);
-    const prev = (data.med_logs || []).find((l) => l.med_id === id && l.date === todayYmd() && l.slot === slot);
-    if (status === 'taken' && prev && prev.status === 'taken') { toast(`Already taken today at ${fmtTime(prev.taken_at)}. Not logged twice.`); return; }
-    await api(`/api/tasks/${id}/log`, { body: { occ: `${todayYmd()} ${slot}`, status: status === 'taken' ? 'done' : status } });
-    const undo = status === 'undo' ? null : remember(`${status === 'skipped' ? 'Skipped' : 'Took'} ${m ? m.name : 'dose'} (${fmtTime(slotDate(slot).toISOString())})`, { k: 'med', id, date: todayYmd(), slot });
+    const isToday = date === todayYmd();
+    const dayTxt = isToday ? 'today' : date === TK.addDays(todayYmd(), -1) ? 'yesterday' : parseDay(date).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    const prev = (data.med_logs || []).find((l) => l.med_id === id && l.date === date && l.slot === slot);
+    if (status === 'taken' && prev && prev.status === 'taken') { toast(`Already logged as taken ${dayTxt}. Not logged twice.`); return; }
+    await api(`/api/tasks/${id}/log`, { body: { occ: `${date} ${slot}`, status: status === 'taken' ? 'done' : status } });
+    const undo = status === 'undo' ? null : remember(`${status === 'skipped' ? 'Skipped' : 'Took'} ${m ? m.name : 'dose'} (${isToday ? '' : `${dayTxt} `}${fmtSlot(slot)})`, { k: 'med', id, date, slot });
     await refresh();
-    toast(status === 'undo' ? 'Undone' : status === 'skipped' ? 'Skipped for today' : `${m ? m.name : 'Dose'} logged as taken`, undo);
+    toast(status === 'undo' ? 'Undone' : status === 'skipped' ? `Skipped ${dayTxt}'s dose` : `${m ? m.name : 'Dose'} logged as taken${isToday ? '' : ` ${dayTxt}`}`, undo);
   }
 
   // Medication sheet: preset chips; the days or dates you tap set how many doses there are.
@@ -3185,7 +3224,7 @@ import * as TK from './tasks.js';
     if (act === 'all-type') { ui.allType = el.dataset.v; render(); return; }
     if (act === 'task-open') { const t = taskById(id); if (t) openTask(t); return; }
     if (act === 'task-skip') { const t = taskById(id); if (t) taskDo(t, 'skipped', { key: el.dataset.occ }).catch((err) => toast(err.message)); return; }
-    if (act === 'med-skip') { logMed(id, el.dataset.slot, 'skipped').catch((err) => toast(err.message)); return; }
+    if (act === 'med-skip') { logMed(id, el.dataset.slot, 'skipped', el.dataset.date || todayYmd()).catch((err) => toast(err.message)); return; }
     if (act === 'home-week') { homeSnooze(id, 7).catch((err) => toast(err.message)); return; }
     if (act === 'rw-not-now') {
       const c = rwCard(el.dataset.card), b = c && rwBen(c, el.dataset.ben); const p = b && RW.benUse(rwCtx(), c, b, startOfDay().getFullYear()).cur;
@@ -3322,7 +3361,7 @@ import * as TK from './tasks.js';
         const undo = remember(`Done: ${plural(ids.length, 'Home task')}`, { k: 'home-log', ids, date: todayYmd(), snooze });
         await refresh(); toast(`Marked ${plural(ids.length, 'task')} done`, undo);
       }
-      else if (act === 'med-take') await logMed(id, el.dataset.slot, 'taken');
+      else if (act === 'med-take') await logMed(id, el.dataset.slot, 'taken', el.dataset.date || todayYmd());
       else if (act === 'med-undo') { if (confirm('Undo this dose?')) await logMed(id, el.dataset.slot, 'undo'); }
       else if (act === 'med-open') { const t = taskById(id); if (t) openTask(t); }
       else if (act === 'med-new') openTask({ kind: 'med', repeat: 'daily', time: '08:00', nag: 1, nag_mode: 'hourly' });
