@@ -311,7 +311,7 @@ import * as TK from './tasks.js';
     const done = it.status === 'done';
     const swipe = !done && it.kind === 'task';
     return `<li class="row${swipe ? ' sw' : ''}"${swipe ? ` data-swipe="${it.id}"` : ''}><div class="row-inner">
-      ${when !== null ? `<span class="when">${esc(when)}</span>` : ''}
+      ${when !== null ? `<span class="when">${whenHtml(when)}</span>` : ''}
       ${it.trip_id || it.source === 'wayfare' ? kindMark('suitcase', 'k-trip') : kindMark('check', 'k-task')}
       <button type="button" class="row-main" data-act="edit" data-id="${it.id}">
         <div class="t${done ? ' done-t' : ''}">${esc(it.title)}</div>
@@ -345,7 +345,7 @@ import * as TK from './tasks.js';
   function eventRow(ev, { when, meta }) {
     const note = ev.pref && ev.pref.note ? `<div class="meta">${esc(ev.pref.note)}</div>` : '';
     return `<li class="row">
-      <span class="when">${esc(when)}</span>
+      <span class="when">${whenHtml(when)}</span>
       ${kindMark('calendar')}
       <button type="button" class="row-main" data-act="event" data-id="${ev.id}"><div class="t">${esc(ev.title)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}${note}</button>
     </li>`;
@@ -363,6 +363,8 @@ import * as TK from './tasks.js';
 
   // Lists where no row has a time drop the empty time column (otherwise items sit oddly far in)
   // Lists drop the empty time column when nothing in them has a time; Today keeps it so every day lines up
+  // The left time column: "All day" stacks as All / day so it fits like a time
+  const whenHtml = (w) => (w === 'All day' ? 'All<br>day' : esc(w));
   const listCard = (rows, { keepWhen = false } = {}) => { const timed = keepWhen || rows.some((r) => /class="when">\s*[^<\s]/.test(r));
     return `<div class="card${timed ? '' : ' no-when'}"><ul class="list">${rows.join('')}</ul></div>`; };
   // Sections can fold away (remembered on this device) and carry a quick "+" button.
@@ -421,7 +423,7 @@ import * as TK from './tasks.js';
     const trow = ({ when = '', icon, cls = '', title, meta = '', open, done, dismiss, late = false, later }) => {
       const swipe = done || later;
       return `<li class="row trow${late ? ' late-row' : ''}${swipe ? ' sw' : ''}"${swipe ? ` data-swipe="row" data-kind="trow" data-later="${esc(later ? later.label : 'Later')}"` : ''}><div class="row-inner">
-      <span class="when">${late ? '<span class="late">Late</span>' : esc(when)}</span>
+      <span class="when">${late ? '<span class="late">Late</span>' : whenHtml(when)}</span>
 ${kindMark(icon, cls)}
       <button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
       ${done ? `<button type="button" class="check tcheck" ${done.attrs} aria-label="${esc(done.label)}"></button>` : ''}
@@ -1446,7 +1448,7 @@ ${kindMark(icon, cls)}
     const mmdd = date.slice(5);
     const rows = [];
     // Rows are sorted at the end: all-day and untimed first, then by time of day
-    const row = (when, title, meta, open, at = null) => rows.push({ at, html: `<li class="row"><span class="when">${esc(when)}</span>${kindMark({ event: 'calendar', med: 'pill', home: 'home', trip: 'suitcase', person: /birthday/i.test(title) ? 'balloon' : 'heart', item: 'calendar' }[open.split(':')[0]] || 'calendar', { med: 'k-med', person: 'k-people', home: 'k-home', trip: 'k-travel' }[open.split(':')[0]] || '')}<button type="button" class="row-main" data-open="${esc(open)}"><div class="t">${esc(title)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>` });
+    const row = (when, title, meta, open, at = null) => rows.push({ at, html: `<li class="row"><span class="when">${whenHtml(when)}</span>${kindMark({ event: 'calendar', med: 'pill', home: 'home', trip: 'suitcase', person: /birthday/i.test(title) ? 'balloon' : 'heart', item: 'calendar' }[open.split(':')[0]] || 'calendar', { med: 'k-med', person: 'k-people', home: 'k-home', trip: 'k-travel' }[open.split(':')[0]] || '')}<button type="button" class="row-main" data-open="${esc(open)}"><div class="t">${esc(title)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>` });
     const evs = data.events.filter((e) => !(e.pref && e.pref.hidden) && !birthdayEventPerson(e.title, data.people) && new Date(e.start_at) < d1 && (e.end_at ? new Date(e.end_at) > d0 : new Date(e.start_at) >= d0))
       .sort((a, b) => (a.all_day - b.all_day) || (Date.parse(a.start_at) - Date.parse(b.start_at)));
     for (const e of evs) row(e.all_day ? 'All day' : fmtShortTime(e.start_at), e.title, placeLines('Calendar', e), `event:${e.id}`, e.all_day ? null : Math.max(+d0, Date.parse(e.start_at)));
@@ -1763,7 +1765,7 @@ ${kindMark(icon, cls)}
   // All: every kind of task in one place, filtered by type (and by area for everyday tasks)
   const ALL_TYPES = [['all', 'All'], ['tasks', 'Tasks'], ['habits', 'Habits'], ['meds', 'Medications'], ['home', 'Home'], ['people', 'People'], ['credits', 'Credits'], ['dinners', 'Dinners']];
   function allRow({ when = '', icon, cls = '', title, meta = '', open }) {
-    return `<li class="row"><span class="when">${esc(when)}</span>${kindMark(icon, cls)}<button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>`;
+    return `<li class="row"><span class="when">${whenHtml(when)}</span>${kindMark(icon, cls)}<button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>`;
   }
   const shortDate = whenShort;
   function allSections(type) {
