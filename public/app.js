@@ -3411,6 +3411,7 @@ import * as TK from './tasks.js';
     }
     lastHash = location.hash;
     if (currentView() === 'people') { ui.peopleFilter = 'birthdays'; ui.peopleQuery = ''; } // People always opens on Birthdays
+    if (currentView() === 'rewards') ui.rwTab = 'cards'; // Rewards always opens on Cards
     render(); window.scrollTo(0, 0);
   });
 
