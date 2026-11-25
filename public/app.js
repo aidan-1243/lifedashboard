@@ -87,6 +87,12 @@ import * as TK from './tasks.js';
     return d.getMinutes() ? `${h}:${String(d.getMinutes()).padStart(2, '0')}${ap}` : `${h}${ap}`; };
   const fmtDay = (iso) => new Date(iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
   const weekday = (d, style = 'short') => new Date(d).toLocaleDateString([], { weekday: style });
+  // The short date for every list's left column: Late, Today, Tmrw, a weekday this week, then "Dec 13"
+  const whenShort = (d) => {
+    const day = typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? parseDay(d) : new Date(d);
+    const n = daysBetween(startOfDay(), day);
+    return n < 0 ? 'Late' : n === 0 ? 'Today' : n === 1 ? 'Tmrw' : n < 7 ? weekday(day) : day.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
   const daysBetween = (a, b) => Math.round((startOfDay(b) - startOfDay(a)) / DAY);
   const areaClass = (a) => (a && AREAS[a] ? `a-${a}` : '');
   const initials = (name) => (name || '?').split(/\s+/).filter((w) => /^[\p{L}\p{N}]/u.test(w)).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
@@ -268,7 +274,11 @@ import * as TK from './tasks.js';
     if (it.due_at && !skipDue) {
       const late = Date.parse(it.due_at) < now && it.status === 'open';
       parts.push(late ? `<span class="late">${esc(relDue(it.due_at))}</span>` : esc(relDue(it.due_at)));
-    } else if (it.due_at && skipDue && hasTime(it.due_at)) parts.push(esc(fmtTime(it.due_at)));
+    } else if (it.due_at && skipDue) {
+      // The row's left column already shows the day; say how late, or just the time
+      if (Date.parse(it.due_at) < now && it.status === 'open') parts.push(`<span class="late">${esc(relDue(it.due_at))}</span>`);
+      else if (hasTime(it.due_at)) parts.push(esc(fmtTime(it.due_at)));
+    }
     if (NAG_SHORT[it.nag]) parts.push(NAG_SHORT[it.nag]);
     if (it.repeat && it.task) { parts.push(esc(TK.describeRepeat(it.task).toLowerCase())); const s = streakOf(it.task).current; if (s) parts.push(`${s} 🔥`); }
     if (it.source === 'wayfare') parts.push('Wayfare');
@@ -288,7 +298,7 @@ import * as TK from './tasks.js';
     const swipe = !done && it.kind === 'task';
     return `<li class="row${swipe ? ' sw' : ''}"${swipe ? ` data-swipe="${it.id}"` : ''}><div class="row-inner">
       ${when !== null ? `<span class="when">${esc(when)}</span>` : ''}
-      <button type="button" class="check${done ? ' done' : ''}" data-act="${done ? 'reopen' : 'done'}" data-id="${it.id}" aria-label="${done ? 'Mark not done' : 'Mark done'}: ${esc(it.title)}"></button>
+      <button type="button" class="check${done ? ' done' : ''}" data-act="${done ? 'reopen' : 'done'}" data-id="${it.id}" aria-label="${done ? 'Mark not done' : 'Mark done'}: ${esc(it.title)}"></button>${it.trip_id || it.source === 'wayfare' ? kindMark('suitcase', 'k-trip') : kindMark('check', 'k-task')}
       <button type="button" class="row-main" data-act="edit" data-id="${it.id}">
         <div class="t${done ? ' done-t' : ''}">${esc(it.title)}</div>
         <div class="meta">${itemMeta(it, { skipDue })}</div>
@@ -395,9 +405,9 @@ import * as TK from './tasks.js';
     const trow = ({ when = '', icon, cls = '', title, meta = '', open, done, dismiss, late = false, later }) => {
       const swipe = done || later;
       return `<li class="row trow${late ? ' late-row' : ''}${swipe ? ' sw' : ''}"${swipe ? ` data-swipe="row" data-kind="trow" data-later="${esc(later ? later.label : 'Later')}"` : ''}><div class="row-inner">
-      <span class="when">${late ? '<span class="late">Late</span>' : esc(when)}</span>${kindMark(icon, cls)}
+      <span class="when">${late ? '<span class="late">Late</span>' : esc(when)}</span>
+      ${done ? `<button type="button" class="check tcheck" ${done.attrs} aria-label="${esc(done.label)}"></button>` : '<span class="check-ph" aria-hidden="true"></span>'}${kindMark(icon, cls)}
       <button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
-      ${done ? `<button type="button" class="check tcheck" ${done.attrs} aria-label="${esc(done.label)}"></button>` : ''}
       ${dismiss ? `<button type="button" class="tx" ${dismiss} aria-label="Hide for today">×</button>` : ''}
       ${later ? `<button type="button" class="tlater" ${later.attrs} hidden aria-label="${esc(later.label)}"></button>` : ''}</div></li>`;
     };
@@ -418,7 +428,7 @@ import * as TK from './tasks.js';
         if (!isToday && new Date(e.start_at) < d0) continue; // multi-day events show on their first day
         const keep = (data.event_prefs || []).find((r) => r.key === e.one) || {};
         out.push({ k: 'event', at: e.all_day ? null : Date.parse(e.start_at), html: trow({ when: e.all_day ? '' : fmtShortTime(e.start_at), icon: 'calendar', cls: 'k-event', title: esc(e.title),
-          meta: [e.all_day ? 'All day' : `${esc(fmtTime(e.start_at))}${e.end_at ? `–${esc(fmtTime(e.end_at))}` : ''}`, e.location ? esc(e.location) : '', e.pref && e.pref.note ? esc(e.pref.note) : ''].filter(Boolean).join(' · '),
+          meta: [e.all_day ? 'All day' : `${esc(fmtTime(e.start_at))}${e.end_at ? `–${esc(fmtTime(e.end_at))}` : ''}`, e.location ? esc(shortLoc(e.location)) : '', e.pref && e.pref.note ? esc(e.pref.note) : ''].filter(Boolean).join(' · '),
           open: `data-act="event" data-id="${e.id}"`, dismiss: e.all_day && isToday ? `data-act="ev-hide" data-key="${esc(e.one)}" data-keep='${esc(JSON.stringify({ note: keep.note || null, label: keep.label || e.title }))}'` : null }) });
       }
       // Tasks due this day (overdue ones are in Today's late block)
@@ -525,7 +535,7 @@ import * as TK from './tasks.js';
       <section aria-label="Today">${head(`Today <span class="n">${todayRows.length || ''}</span>`, { key: 'rest' })}
         ${!isCol('rest') && overdue.length ? `<button type="button" class="link tmove" data-act="late-tomorrow" data-ids="${overdue.map((i) => i.id).join(',')}">Move ${overdue.length === 1 ? 'the late task' : `all ${overdue.length} late tasks`} to tomorrow</button>` : ''}
         ${isCol('rest') ? '' : todayRows.length ? listCard(todayRows) : `<div class="allclear">${synced ? 'Nothing else today. Enjoy it.' : 'Nothing yet. Calendar events appear once the Shortcut runs.'}</div>`}</section>
-      <section aria-label="This week">${head(`This week <span class="n">${weekDays.reduce((n, x) => n + x.rows.length, 0) || ''}</span>`, { key: 'upcoming', add: 'go-meals', addLabel: 'Plan meals' })}
+      <section aria-label="This week">${head(`This week <span class="n">${weekDays.reduce((n, x) => n + x.rows.length, 0) || ''}</span>`, { key: 'upcoming', add: 'go-meals', addLabel: 'Plan dinners' })}
         ${isCol('upcoming') ? '' : weekDays.length ? weekDays.map((x) => `<div class="tday"><button type="button" class="tday-h" data-act="day" data-date="${x.D}">${esc(x.d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }))}</button>${listCard(x.rows)}</div>`).join('') : '<div class="allclear">Nothing else this week.</div>'}</section>
       ${catchUp}
       ${tgroup('Later', tripCard)}
@@ -580,10 +590,10 @@ import * as TK from './tasks.js';
 
   // Today's event detail: countdown and place.
   function eventMeta(e, now) {
-    if (e.all_day) return e.location ? esc(e.location) : '';
+    if (e.all_day) return e.location ? esc(shortLoc(e.location)) : '';
     const parts = [];
     if (Date.parse(e.start_at) > now.getTime()) parts.push(`in ${untilText(e.start_at)}`);
-    if (e.location) parts.push(esc(e.location));
+    if (e.location) parts.push(esc(shortLoc(e.location)));
     return parts.join(' · ');
   }
 
@@ -690,7 +700,7 @@ import * as TK from './tasks.js';
     return { date: next, time: tm, key, log: logs.get(key) || null, future: true };
   }
   const streakOf = (t) => (t.kind === 'catchup' ? catchupStreak(t) : TK.streak(t, taskLog(t), todayYmd()));
-  const flame = (n) => `<span class="tk-fire${n ? '' : ' zero'}" aria-label="${n}-time streak">${n} 🔥</span>`;
+  const flame = (n) => (n ? `<span class="tk-fire" aria-label="${n}-time streak">${n} 🔥</span>` : ''); // no badge until there's a streak
 
   async function taskDo(t, status, occ = taskOcc(t)) {
     if (!occ) return;
@@ -758,7 +768,7 @@ import * as TK from './tasks.js';
       `}${isPeople ? '' : `<div class="lbl">Schedule</div>
       <div class="tk-group">
         ${sw('has_date', !!t.date, `${kindMark('calendar')} Date`)}
-        <label class="tk-row tk-sub" data-tkshow="date"><span>On</span><input type="date" name="date" value="${esc(t.date || todayYmd())}"></label>
+        <label class="tk-row tk-sub" data-tkshow="date"><span data-onlabel>${(t.repeat || 'never') === 'never' ? 'On' : 'Starts'}</span><input type="date" name="date" value="${esc(t.date || todayYmd())}"></label>
         ${sw('has_time', !!t.time, `${kindMark('clock')} Time`)}
         <label class="tk-row tk-sub" data-tkshow="time"><span>At</span><input type="time" name="time" value="${esc(t.time || '08:00')}"></label>
         <label class="tk-row" data-tkshow="date"><span>${kindMark('repeat')} Repeat</span><select name="repeat">${opt(TK.REPEATS, t.repeat || 'never')}</select></label>
@@ -780,7 +790,7 @@ import * as TK from './tasks.js';
         <div class="tk-row"><span class="meta">${lastDone ? `Last done ${esc(dayLabel(lastDone.occ.slice(0, 10)))}` : 'Not done yet'} · best ${st.best}</span><button type="button" class="link" data-tk="all">All ›</button></div>
         <div class="tk-all" hidden>${taskLog(t).sort((a, z) => z.occ.localeCompare(a.occ)).slice(0, 60).map((l) => `<div class="tk-row"><span>${esc(dayLabel(l.occ.slice(0, 10)))}${l.occ.length > 10 ? ` ${fmtSlot(l.occ.slice(11))}` : ''} · ${l.status === 'skipped' ? 'skipped' : 'done'}</span><button type="button" class="pbtn icon" data-tkdel="${esc(l.occ)}" aria-label="Remove this entry">×</button></div>`).join('') || '<div class="tk-row meta">Nothing yet</div>'}</div>
       </div>`}
-      <div class="actions">${isNew ? '' : '<button type="button" class="btn danger" data-tk="remove">Remove</button>'}<span class="grow"></span>
+      <div class="actions">${isNew ? '' : '<button type="button" class="btn danger" data-tk="remove">Delete</button>'}<span class="grow"></span>
         <button type="button" class="btn ghost" data-sheet="close">${isNew ? 'Cancel' : 'Close'}</button><button type="submit" class="btn dark">Save</button></div>
     </form>`;
     const form = sheet.querySelector('form');
@@ -790,6 +800,7 @@ import * as TK from './tasks.js';
         nag: has('nag'), nagoff: !has('nag') && has('has_date'), nagday: has('nag') && form.nag_mode.value === 'weekly', nagtime: has('nag') && form.nag_mode.value !== 'hourly' };
       form.querySelectorAll('[data-tkshow]').forEach((el) => { el.hidden = !vis[el.dataset.tkshow]; });
       const tr = form.querySelector('label.tk-row:has([name="has_time"])'); if (tr) tr.hidden = !vis.date || form.repeat.value === 'custom';
+      const on = form.querySelector('[data-onlabel]'); if (on) on.textContent = form.repeat.value === 'never' ? 'On' : 'Starts'; // a repeating task's date is when it starts
     };
     const drawCustom = () => {
       const box = form.querySelector('.tk-custom');
@@ -812,7 +823,7 @@ import * as TK from './tasks.js';
         else if (a === 'snooze7') { await api(`/api/tasks/${t.id}/snooze`, { body: { minutes: 7 * 1440 } }); sheet.close(); await refresh(); toast('Reminders paused for a week'); }
         else if (a === 'person') { if (person) openPerson(person); }
         else if (a === 'all') { const box = form.querySelector('.tk-all'); box.hidden = !box.hidden; }
-        else if (a === 'remove') { if (!confirm(`Remove "${t.title}"? Its history is kept in backups.`)) return; await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Removed'); }
+        else if (a === 'remove') { if (!confirm(`Delete "${t.title}"? Its history is kept in backups.`)) return; await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Deleted'); }
       } catch (err) { toast(err.message); }
     }; });
     form.querySelectorAll('[data-focus-min]').forEach((b) => { b.onclick = async () => { sheet.close(); await startFocus(t.id, +b.dataset.focusMin); }; });
@@ -974,8 +985,8 @@ import * as TK from './tasks.js';
         </button></li>`;
     }).join('');
     return `
-      <header class="head-row"><h1>Meals</h1><a class="link" href="#today" style="padding:0">‹ Today</a></header>
-      <div class="filters" role="group" aria-label="Week"><button type="button" data-act="meal-week" data-v="0" aria-pressed="${ui.mealWeek === 0}">This week</button><button type="button" data-act="meal-week" data-v="1" aria-pressed="${ui.mealWeek === 1}">Next week</button></div>
+      <header class="head-row"><h1>Dinners</h1><a class="link" href="#today">Done</a></header>
+      <div class="seg3 seg2" role="group" aria-label="Week"><button type="button" data-act="meal-week" data-v="0" aria-pressed="${ui.mealWeek === 0}">This week</button><button type="button" data-act="meal-week" data-v="1" aria-pressed="${ui.mealWeek === 1}">Next week</button></div>
       <p class="home-sum" style="margin:0">${esc(range)} · ${left ? `${plural(left, 'night')} to plan` : 'all planned ✓'}. Evening calendar plans show under each day.</p>
       <div class="card"><ul class="list">${rows}</ul></div>
     `;
@@ -1070,17 +1081,18 @@ import * as TK from './tasks.js';
   // Home row: checkbox, room icon, title (up to 2 lines), and when it's due. Frequency etc. live in the task sheet.
   function homeRow(t, info) {
     const icon = `<span class="ricon sm" title="${esc(t.room || '')}">${roomIcon(t.room)}</span>`;
-    const due = `<span class="hdue ${info.cls}">${esc(shortDue(info))}</span>`;
-    const title = `<div class="t t2">${esc(t.name)}</div>${info.snoozed ? '<div class="meta">Snoozed</div>' : ''}`;
+    const due = `<span class="when hdue ${info.cls}">${info.k < 0 && !info.completed ? '<span class="late">Late</span>' : esc(shortDue(info))}</span>`;
+    const sub = info.k < 0 && !info.completed ? `<span class="late">${-info.k} day${info.k === -1 ? '' : 's'} late</span>` : info.snoozed ? 'Snoozed' : '';
+    const title = `<div class="t t2">${esc(t.name)}</div>${sub ? `<div class="meta">${sub}</div>` : ''}`;
     if (ui.homeSelect) {
       const on = ui.homeSelect.has(t.id);
       return `<li class="row hrow${on ? ' picked' : ''}"><div class="row-inner">
-        <button type="button" class="check${on ? ' done' : ''}" data-act="home-pick" data-id="${t.id}" aria-pressed="${on}" aria-label="Select ${esc(t.name)}"></button>${icon}
-        <button type="button" class="row-main" data-act="home-pick" data-id="${t.id}">${title}</button>${due}</div></li>`;
+        ${due}<button type="button" class="check${on ? ' done' : ''}" data-act="home-pick" data-id="${t.id}" aria-pressed="${on}" aria-label="Select ${esc(t.name)}"></button>${icon}
+        <button type="button" class="row-main" data-act="home-pick" data-id="${t.id}">${title}</button></div></li>`;
     }
     return `<li class="row sw hrow" data-swipe="${t.id}" data-kind="home"><div class="row-inner">
-      <button type="button" class="check" data-act="home-done" data-id="${t.id}" aria-label="Done today: ${esc(t.name)}"></button>${icon}
-      <button type="button" class="row-main" data-act="home-open" data-id="${t.id}">${title}</button>${due}
+      ${due}<button type="button" class="check" data-act="home-done" data-id="${t.id}" aria-label="Done today: ${esc(t.name)}"></button>${icon}
+      <button type="button" class="row-main" data-act="home-open" data-id="${t.id}">${title}</button>
     </div></li>`;
   }
 
@@ -1399,7 +1411,7 @@ import * as TK from './tasks.js';
           <div class="tk-row"><input type="date" id="h-date" max="${todayYmd()}" aria-label="Date completed"><button type="button" class="pbtn" data-h="date">Done on this day</button></div>
         </div>
       </div>`}
-      <div class="actions">${isNew ? '' : '<button type="button" class="btn danger" data-h="hide">Remove</button>'}<span class="grow"></span>
+      <div class="actions">${isNew ? '' : '<button type="button" class="btn danger" data-h="hide">Delete</button>'}<span class="grow"></span>
         <button type="button" class="btn ghost" data-sheet="close">${isNew ? 'Cancel' : 'Close'}</button><button type="submit" class="btn dark">Save</button></div>
     </form>`;
     const form = sheet.querySelector('form');
@@ -1424,7 +1436,7 @@ import * as TK from './tasks.js';
         else if (act === 'hist') { const panel = form.querySelector('[data-hpanel="hist"]'); panel.hidden = !panel.hidden; }
         else if (act === 'date') { const d = form.querySelector('#h-date').value; if (!d) { toast('Pick a date'); return; } await homeLog(t.id, d); openHomeTask(data.home_tasks.find((x) => x.id === t.id)); }
         else if (act === 'unlog') { await api(`/api/home/log/${b.dataset.id}`, { method: 'DELETE' }); await refresh(); openHomeTask(data.home_tasks.find((x) => x.id === t.id)); form.querySelector('[data-hpanel="hist"]')?.removeAttribute('hidden'); }
-        else if (act === 'hide') { if (!confirm(`Remove "${t.name}"? Its history is kept.`)) return; await api(`/api/home/tasks/${t.id}`, { method: 'PATCH', body: { hidden: 1 } }); sheet.close(); await refresh(); toast('Removed'); }
+        else if (act === 'hide') { if (!confirm(`Delete "${t.name}"? Its history is kept.`)) return; await api(`/api/home/tasks/${t.id}`, { method: 'PATCH', body: { hidden: 1 } }); sheet.close(); await refresh(); toast('Deleted'); }
       } catch (err) { toast(err.message); }
     }; });
     form.onsubmit = async (e) => {
@@ -1472,7 +1484,7 @@ import * as TK from './tasks.js';
     const row = (when, title, meta, open, at = null) => rows.push({ at, html: `<li class="row"><span class="when">${esc(when)}</span>${kindMark({ event: 'calendar', med: 'pill', home: 'home', trip: 'suitcase', person: /birthday/i.test(title) ? 'balloon' : 'heart', item: 'calendar' }[open.split(':')[0]] || 'calendar', { med: 'k-med', person: 'k-people', home: 'k-home', trip: 'k-travel' }[open.split(':')[0]] || '')}<button type="button" class="row-main" data-open="${esc(open)}"><div class="t">${esc(title)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>` });
     const evs = data.events.filter((e) => !(e.pref && e.pref.hidden) && !birthdayEventPerson(e.title, data.people) && new Date(e.start_at) < d1 && (e.end_at ? new Date(e.end_at) > d0 : new Date(e.start_at) >= d0))
       .sort((a, b) => (a.all_day - b.all_day) || (Date.parse(a.start_at) - Date.parse(b.start_at)));
-    for (const e of evs) row(e.all_day ? 'All day' : fmtShortTime(e.start_at), e.title, `Calendar${e.location ? ` · ${esc(e.location)}` : ''}`, `event:${e.id}`, e.all_day ? null : Math.max(+d0, Date.parse(e.start_at)));
+    for (const e of evs) row(e.all_day ? 'All day' : fmtShortTime(e.start_at), e.title, `Calendar${e.location ? ` · ${esc(shortLoc(e.location))}` : ''}`, `event:${e.id}`, e.all_day ? null : Math.max(+d0, Date.parse(e.start_at)));
     for (const t of data.items.filter((i) => i.status === 'open' && i.due_at && new Date(i.due_at) >= d0 && new Date(i.due_at) < d1)) row(hasTime(t.due_at) ? fmtShortTime(t.due_at) : '', t.title, itemMeta(t, { skipDue: true }), `item:${t.id}`, hasTime(t.due_at) ? Date.parse(t.due_at) : null);
     for (const m of (data.meds || []).filter((x) => medDueOn(x, date))) { for (const slot of slotsOn(m, date)) { const [hh, mm] = slot.split(':').map(Number); const t0 = new Date(d0); t0.setHours(hh, mm, 0, 0); row(fmtSlot(slot), m.name, `Medication${m.dose ? ` · ${esc(m.dose)}` : ''}`, `med:${m.id}`, +t0); } }
     for (const h of (data.home_tasks || []).filter((t) => homeInfo(t).due === date)) row('', h.name, `Home · ${esc(h.room || '')}`, `home:${h.id}`);
@@ -1765,10 +1777,10 @@ import * as TK from './tasks.js';
     const rows = [
       section('Tasks & notes', items.map((i) => itemRow(i))),
       section('People', people.map((p) => personRow(p, [p.circle ? CIRCLES[p.circle] : '', (data.gifts || []).filter((g) => g.person_id === p.id && has(g.idea)).map((g) => `gift: ${esc(g.idea)}`).join(', ')].filter(Boolean).join(' · ')))),
-      section('Calendar', events.map((e) => eventRow(e, { when: weekday(e.start_at), meta: `${esc(new Date(e.start_at).toLocaleDateString([], { month: 'short', day: 'numeric' }))}${e.all_day ? '' : ` · ${esc(fmtTime(e.start_at))}`}${e.location ? ` · ${esc(e.location)}` : ''}` }))),
+      section('Calendar', events.map((e) => eventRow(e, { when: weekday(e.start_at), meta: `${esc(new Date(e.start_at).toLocaleDateString([], { month: 'short', day: 'numeric' }))}${e.all_day ? '' : ` · ${esc(fmtTime(e.start_at))}`}${e.location ? ` · ${esc(shortLoc(e.location))}` : ''}` }))),
       section('Trips', trips.map((x) => `<li class="row"><a class="row-main" style="text-decoration:none;color:inherit" href="${esc(x.link || '#')}" target="_blank" rel="noopener"><div class="t">${esc(x.name)}</div><div class="meta">${esc(fmtRange(x.start_date, x.end_date))}</div></a></li>`)),
       section('Medications', meds.map((m) => allRow({ icon: 'pill', cls: 'k-med', title: esc(m.name), meta: esc(describeSchedule(m)), open: `data-act="med-open" data-id="${m.id}"` }))),
-      section('Habits', habits.map((h) => allRow({ icon: 'check', cls: 'k-habit', title: esc(h.title), meta: `${streakOf(h).current} 🔥`, open: `data-act="task-open" data-id="${h.id}"` }))),
+      section('Habits', habits.map((h) => allRow({ icon: 'check', cls: 'k-habit', title: esc(h.title), meta: streakOf(h).current ? `${streakOf(h).current} 🔥` : 'Habit', open: `data-act="task-open" data-id="${h.id}"` }))),
       section('Home', homes.map((h) => homeRow(h, homeInfo(h)))),
       section('Credits', credits.map(({ c, b }) => allRow({ icon: 'card', cls: 'k-credit', title: esc(b.name), meta: `${esc(rwOwner(c))}'s ${esc(c.name)}`, open: `data-act="rw-ben" data-card="${esc(c.id)}" data-ben="${esc(b.id)}"` }))),
       section('Dinners', dinners.map((t) => allRow({ when: shortDate(t.date), icon: 'fork', cls: 'k-meal', title: esc(t.title), open: `data-act="meal-open" data-date="${t.date}"` }))),
@@ -1788,7 +1800,7 @@ import * as TK from './tasks.js';
   function allRow({ when = '', icon, cls = '', title, meta = '', open }) {
     return `<li class="row"><span class="when">${esc(when)}</span>${kindMark(icon, cls)}<button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>`;
   }
-  const shortDate = (D) => { const d = parseDay(D); const n = daysBetween(startOfDay(), d); return n === 0 ? 'Today' : n === 1 ? 'Tmrw' : n < 0 ? 'Late' : n < 7 ? weekday(d) : d.toLocaleDateString([], { month: 'numeric', day: 'numeric' }); };
+  const shortDate = whenShort;
   function allSections(type) {
     const out = [];
     const want = (k) => type === 'all' || type === k;
@@ -1796,15 +1808,15 @@ import * as TK from './tasks.js';
       const filter = (i) => ui.allArea === 'all' || (ui.allArea === 'none' ? !i.area : i.area === ui.allArea);
       const open = data.items.filter((i) => i.status === 'open' && filter(i));
       const tasks = open.filter((i) => i.kind === 'task');
-      const whenFor = (i) => { const d = daysBetween(new Date(), new Date(i.due_at)); return d === 0 ? 'Today' : d === 1 ? 'Tmrw' : d < 0 ? 'Late' : d < 7 ? weekday(i.due_at) : new Date(i.due_at).toLocaleDateString([], { month: 'numeric', day: 'numeric' }); };
+      const whenFor = (i) => (Date.parse(i.due_at) < Date.now() ? 'Late' : whenShort(i.due_at));
       const dated = tasks.filter((i) => i.due_at).sort((x, y) => Date.parse(x.due_at) - Date.parse(y.due_at));
-      out.push(section(`Tasks <span class="n">${tasks.length}</span>`, [...dated.map((i) => itemRow(i, { when: whenFor(i) })), ...tasks.filter((i) => !i.due_at).map((i) => itemRow(i))], type === 'tasks' ? 'No open tasks.' : null, { key: 'all-tasks' }));
+      out.push(section(`Tasks <span class="n">${tasks.length}</span>`, [...dated.map((i) => itemRow(i, { when: whenFor(i), skipDue: true })), ...tasks.filter((i) => !i.due_at).map((i) => itemRow(i))], type === 'tasks' ? 'No open tasks.' : null, { key: 'all-tasks' }));
       const notes = open.filter((i) => i.kind === 'note');
       if (notes.length) out.push(section(`Notes <span class="n">${notes.length}</span>`, notes.map((i) => itemRow(i)), null, { key: 'all-notes' }));
     }
     if (want('habits')) {
       const hs = myHabits();
-      out.push(section(`Habits <span class="n">${hs.length}</span>`, hs.map((t) => { const s2 = streakOf(t); return allRow({ icon: 'check', cls: 'k-habit', title: esc(t.title), meta: `${esc(TK.describeRepeat(t))} · ${s2.current} 🔥 · best ${s2.best}`, open: `data-act="task-open" data-id="${t.id}"` }); }), type === 'habits' ? 'No habits yet. Add one in Settings.' : null, { key: 'all-habits' }));
+      out.push(section(`Habits <span class="n">${hs.length}</span>`, hs.map((t) => { const s2 = streakOf(t); return allRow({ icon: 'check', cls: 'k-habit', title: esc(t.title), meta: [esc(TK.describeRepeat(t)), s2.current ? `${s2.current} 🔥` : '', s2.best > s2.current ? `best ${s2.best}` : ''].filter(Boolean).join(' · '), open: `data-act="task-open" data-id="${t.id}"` }); }), type === 'habits' ? 'No habits yet. Add one in Settings.' : null, { key: 'all-habits' }));
     }
     if (want('meds')) {
       const ms = data.meds || [];
@@ -1907,7 +1919,6 @@ import * as TK from './tasks.js';
           <label class="field"><span>Until</span><select name="quiet_end">${hours(s.quiet_end)}</select></label>
         </div>
         <label class="field"><span>Morning briefing at</span><select name="briefing_hour">${hours(s.briefing_hour)}</select></label>
-        <div><button class="btn dark" type="submit">Save</button></div>
       </form>
       <div class="setting">
         <strong>Notifications</strong>
@@ -1947,22 +1958,20 @@ import * as TK from './tasks.js';
         <button type="button" class="link" data-act="med-new">+ Add a medication</button>
       </div>
       <form class="setting" id="meal-form">
-        <strong>Meal planning</strong>
+        <strong>Dinner planning</strong>
         <p>A Sunday nudge if any of the next 7 nights don't have a dinner plan yet. Your plan for tonight also appears in the morning briefing.</p>
         <label class="field"><span>Sunday reminder at</span><select name="meal_plan_hour"><option value="-1"${s.meal_plan_hour === '-1' ? ' selected' : ''}>Off</option>${[9, 10, 12, 14, 16, 17, 18, 19].map((h) => `<option value="${h}"${(s.meal_plan_hour === undefined || s.meal_plan_hour === '' ? 16 : +s.meal_plan_hour) === h ? ' selected' : ''}>${new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric' })}</option>`).join('')}</select></label>
-        <div><button class="btn dark" type="submit">Save</button></div>
       </form>
       <form class="setting" id="wrap-form">
         <strong>Evening wrap-up</strong>
         <p>A nudge at night with what you finished and what's left. From 6pm, Today shows a wrap-up card to move leftovers to tomorrow.</p>
         <label class="field"><span>Send at</span><select name="wrap_hour"><option value="-1"${s.wrap_hour === '-1' ? ' selected' : ''}>Off</option>${[18, 19, 20, 21, 22].map((h) => `<option value="${h}"${(s.wrap_hour === undefined || s.wrap_hour === '' ? 21 : +s.wrap_hour) === h ? ' selected' : ''}>${new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric' })}</option>`).join('')}</select></label>
-        <div><button class="btn dark" type="submit">Save</button></div>
       </form>
       <h2 class="set-group" id="set-calendar">Calendar & people</h2>
       <div class="setting">
         <strong>Calendar</strong>
         <p>${s.events_synced_at ? `Last synced ${esc(fmtDay(s.events_synced_at))} at ${esc(fmtTime(s.events_synced_at))}.` : 'Not synced yet.'} Your Shortcut sends upcoming events each morning. Tap any event on Today to hide it or add a note.</p>
-        ${(data.users || []).length > 1 ? `<form class="inline-form" id="shared-cal-form"><label class="field"><span>Shared calendars: both of you see their events (separate names with commas, exactly as in Apple Calendar)</span><input name="shared_calendar" value="${esc(s.shared_calendar || '')}" placeholder="Logan & Aidan, US Holidays"></label><div><button class="btn ghost" type="submit">Save</button></div></form>` : ''}
+        ${(data.users || []).length > 1 ? `<form class="inline-form" id="shared-cal-form"><label class="field"><span>Shared calendars: both of you see their events (separate names with commas, exactly as in Apple Calendar)</span><input name="shared_calendar" value="${esc(s.shared_calendar || '')}" placeholder="Logan & Aidan, US Holidays" enterkeyhint="done"></label></form>` : ''}
         <label class="inline"><input type="checkbox" id="hide-bdays"${s.hide_cal_birthdays === '1' ? ' checked' : ''}> Hide birthday events from the calendar (People already tracks birthdays)</label>
         ${(() => {
           const hidden = (data.event_prefs || []).filter((r) => r.hidden === 1);
@@ -2022,7 +2031,7 @@ import * as TK from './tasks.js';
   function viewRewards() {
     const tab = ui.rwTab || 'cards';
     const body = tab === 'use' ? rwToUse() : tab === 'points' ? rwPoints() : rwCards();
-    return `<header class="head-row"><h1>Rewards</h1>${tab === 'cards' ? '<button type="button" class="sec-add" data-act="rw-add-card" aria-label="Add a card">+</button>' : ''}</header>
+    return `<header class="head-row"><h1>Rewards</h1><button type="button" class="sec-add" data-act="rw-add-card" aria-label="Add a card">+</button></header>
       <div class="seg3" role="group" aria-label="Rewards view">${RW_TABS.map(([k, l]) => `<button type="button" data-act="rw-tab" data-v="${k}" aria-pressed="${tab === k}">${l}</button>`).join('')}</div>
       ${body}`;
   }
@@ -2061,7 +2070,7 @@ import * as TK from './tasks.js';
     }
     const fees4 = ctx.cards.map((c) => ({ c, d: RW.nextFee(ctx, c) })).filter((x) => x.d).sort((a, b) => a.d - b.d).slice(0, 4);
     if (fees4.length) h += section('Upcoming fees', fees4.map(({ c, d }) => `<li class="row"><span class="when">${esc(rwDate(d))}</span>
-      <button type="button" class="row-main" data-act="rw-card" data-id="${esc(c.id)}"><div class="t">${esc(c.name)}</div><div class="meta">${esc(rwOwner(c))} · ${RW.money(c.fee)}${d.getFullYear() !== startOfDay().getFullYear() ? ` · ${d.getFullYear()}` : ''}</div></button></li>`));
+      <button type="button" class="row-main" data-act="rw-card" data-id="${esc(c.id)}"><div class="t">${esc(c.name)}</div><div class="meta">${esc(rwOwner(c))} · ${RW.money(c.fee)}${d.getFullYear() !== startOfDay().getFullYear() ? ' · next year' : ''}</div></button></li>`));
     return h;
   }
 
@@ -2071,7 +2080,7 @@ import * as TK from './tasks.js';
       <button type="button" class="check" data-act="rw-use-all" data-card="${esc(c.id)}" data-ben="${esc(b.id)}" aria-label="Mark ${esc(RW.money(left))} of ${esc(b.name)} used"></button>
       <button type="button" class="row-main" data-act="rw-ben" data-card="${esc(c.id)}" data-ben="${esc(b.id)}">
         <div class="t">${esc(b.name)} · ${esc(RW.money(left))}${left < cap - 0.004 ? ` <span class="rw-of">of ${esc(RW.money(cap))}</span>` : ''}</div>
-        <div class="meta">${esc(rwOwner(c))}'s ${esc(c.name)} · ${esc(rwDays(x.days))}</div></button></li>`;
+        <div class="meta">${esc(rwOwner(c))}'s ${esc(c.name)}${when ? ` · ${esc(rwDays(x.days))}` : ''}</div></button></li>`; // grouped rows: the heading already says when
   }
 
   // Credits: every credit with money left, grouped by when it runs out; then certificates
@@ -2475,6 +2484,7 @@ import * as TK from './tasks.js';
   // Settings for a synced calendar event. Saved by title (all of them) or for
   // just this one, so they survive every calendar sync.
   // Apple Maps: the maps: link opens the Maps app on iPhone/iPad; elsewhere the web page.
+  const shortLoc = (loc) => String(loc || '').replace(/\s*\n\s*/g, ', ').replace(/,\s*(United States|USA|US)\s*$/i, '');
   const mapsUrl = (q) => `${/iPhone|iPad|Macintosh/.test(navigator.userAgent) && 'ontouchend' in document ? 'maps://' : 'https://maps.apple.com/'}?q=${encodeURIComponent(q.replace(/\s*\n\s*/g, ', '))}`;
   const mapLink = (loc) => `<a class="map-link" href="${esc(mapsUrl(loc))}"${mapsUrl(loc).startsWith('https') ? ' target="_blank" rel="noopener"' : ''}>${kindMark('pin')}<span>${esc(loc).replace(/\n/g, '<br>')}</span><b aria-hidden="true">›</b></a>`;
 
@@ -2565,7 +2575,7 @@ import * as TK from './tasks.js';
       ${before.length ? listCard(before.map((i) => itemRow(i, { when: i.due_at ? fmtShortDate(i.due_at) : '' }))) : '<div class="tk-group"><div class="tk-row meta">Nothing left to book</div></div>'}
       <div class="lbl">During the trip</div>
       ${activities.length || events.length ? listCard([
-        ...events.map((e) => eventRow(e, { when: parseDay(RW.ymd(new Date(e.start_at))).toLocaleDateString([], { weekday: 'short', day: 'numeric' }), meta: e.all_day ? (e.location ? esc(e.location) : 'All day') : `${esc(fmtTime(e.start_at))}${e.location ? ` · ${esc(e.location)}` : ''}` })),
+        ...events.map((e) => eventRow(e, { when: parseDay(RW.ymd(new Date(e.start_at))).toLocaleDateString([], { weekday: 'short', day: 'numeric' }), meta: e.all_day ? (e.location ? esc(shortLoc(e.location)) : 'All day') : `${esc(fmtTime(e.start_at))}${e.location ? ` · ${esc(shortLoc(e.location))}` : ''}` })),
         ...activities.map((i) => itemRow(i, { when: fmtShortDate(i.due_at) })),
       ]) : '<div class="tk-group"><div class="tk-row meta">Nothing yet. Calendar events during these dates show up here.</div></div>'}
       ${doneItems.length ? `<details class="tk-done"><summary>Booked · ${doneItems.length}</summary>${listCard(doneItems.map((i) => itemRow(i, { when: '' })))}</details>` : ''}
@@ -2940,12 +2950,63 @@ import * as TK from './tasks.js';
     parsedEl.innerHTML = v ? parsedTags(parseCapture(v, data.people)) : '';
   });
 
-  // Capture starts as a lone + button; tapping it opens the text box and keyboard.
-  const capOpen = () => { capForm.classList.remove('collapsed'); capInput.focus(); };
+  // The + button opens an Add menu (the tab bar stays put): pick what to add, or type a quick task.
   const capClose = () => { capForm.classList.add('collapsed'); capInput.value = ''; parsedEl.innerHTML = ''; capInput.blur(); };
-  capForm.querySelector('button').addEventListener('click', (e) => {
-    if (capForm.classList.contains('collapsed')) { e.preventDefault(); capOpen(); }
-  });
+  const ADD_KINDS = [['task', 'Task', 'check', 'k-task'], ['home', 'Home', 'home', 'k-home'], ['habit', 'Habit', 'repeat', 'k-habit'],
+    ['med', 'Medication', 'pill', 'k-med'], ['person', 'Person', 'people', 'k-people'], ['credit', 'Credit', 'card', 'k-credit']];
+  function openAddMenu() {
+    sheet.innerHTML = `<form method="dialog" class="add-menu">
+      <h3>Add</h3>
+      <div class="add-grid">${ADD_KINDS.map(([k, label, icon, cls]) => `<button type="button" class="add-kind" data-add="${k}">${kindMark(icon, cls)}<span>${label}</span></button>`).join('')}</div>
+      <label class="add-quick"><span>Or type a quick task</span><input name="quick" placeholder="e.g. Call the dentist Friday 2pm" autocomplete="off" enterkeyhint="done"></label>
+      <div class="parsed add-parsed"></div>
+    </form>`;
+    const form = sheet.querySelector('form');
+    form.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-add]'); if (!b) return;
+      const k = b.dataset.add;
+      if (k === 'task') openTask({ kind: 'task', date: null });
+      else if (k === 'home') openHomeTask({});
+      else if (k === 'habit') openTask({ kind: 'habit', repeat: 'daily' });
+      else if (k === 'med') openTask({ kind: 'med', repeat: 'daily', time: '08:00', nag: 1, nag_mode: 'hourly' });
+      else if (k === 'person') openPerson({ name: '' });
+      else if (k === 'credit') openAddCredit();
+    });
+    const quick = form.quick, tags = form.querySelector('.add-parsed');
+    quick.addEventListener('input', () => { const v = quick.value.trim(); tags.innerHTML = v ? parsedTags(parseCapture(v, data.people)) : ''; });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const raw = quick.value.trim(); if (!raw) return;
+      const p = parseCapture(raw, data.people);
+      try {
+        const created = await api('/api/items', { body: { title: p.title, area: p.area, kind: p.kind, due_at: p.due ? p.due.toISOString() : null, nag: p.nag, repeat_days: p.repeat || null, person_id: p.person ? p.person.id : null } });
+        sheet.dataset.dirty = ''; sheet.close();
+        await refresh();
+        toast('Added', async () => { await api(`/api/items/${created.id}`, { method: 'DELETE' }); refresh(); });
+      } catch (err) { toast(err.message); }
+    });
+    showSheet();
+  }
+  // Credits belong to a card: pick the card, then its editor opens on "Add a credit"
+  function openAddCredit() {
+    const cards = (data.rewards || {}).cards || [];
+    if (!cards.length) { openRwAddCard(); return; }
+    const mine = (c) => data.me && c.owner === data.me.id;
+    const sorted = [...cards].sort((a, z) => (mine(z) - mine(a)) || a.name.localeCompare(z.name));
+    sheet.innerHTML = `<form method="dialog">
+      <h3>Add a credit</h3><p class="sub">Which card is it on?</p>
+      <div class="card"><ul class="list">${sorted.map((c) => `<li class="row">${kindMark('card', 'k-credit')}<button type="button" class="row-main" data-cardpick="${esc(c.id)}"><div class="t">${esc(c.name)}</div><div class="meta">${esc(rwOwner(c))}</div></button></li>`).join('')}</ul></div>
+      <div class="actions"><span class="grow"></span><button type="button" class="btn ghost" data-sheet="close">Cancel</button></div>
+    </form>`;
+    sheet.querySelector('form').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-cardpick]'); if (!b) return;
+      openRwCard(b.dataset.cardpick, { edit: true });
+      const add = sheet.querySelector('.rw-addben');
+      if (add) { add.open = true; add.scrollIntoView({ block: 'center' }); }
+    });
+    showSheet();
+  }
+  capForm.querySelector('button').addEventListener('click', (e) => { e.preventDefault(); openAddMenu(); });
   capInput.addEventListener('blur', () => setTimeout(() => {
     if (document.activeElement !== capInput && !capInput.value.trim()) capClose();
   }, 150));
@@ -2981,13 +3042,11 @@ import * as TK from './tasks.js';
       } catch (err) { toast(err.message); }
       return;
     }
-    if (form.id === 'travel-form' || form.id === 'wrap-form' || form.id === 'meal-form' || form.id === 'shared-cal-form') {
-      await api('/api/settings', { method: 'PATCH', body: Object.fromEntries(new FormData(form)) });
-      toast('Saved');
-      await refresh();
+    if (form.id === 'wrap-form' || form.id === 'meal-form' || form.id === 'shared-cal-form' || form.id === 'settings-form') {
+      if (document.activeElement && form.contains(document.activeElement)) document.activeElement.blur(); // blur fires change, which saves
       return;
     }
-    if (form.id === 'settings-form') {
+    if (form.id === 'travel-form') {
       await api('/api/settings', { method: 'PATCH', body: Object.fromEntries(new FormData(form)) });
       toast('Saved');
       await refresh();
@@ -2995,6 +3054,16 @@ import * as TK from './tasks.js';
   });
 
   app.addEventListener('change', async (e) => {
+    // Settings save as soon as you change them (text fields when you leave them), like iPhone Settings
+    const autoForm = e.target.closest && e.target.closest('#settings-form, #meal-form, #wrap-form, #shared-cal-form');
+    if (autoForm && e.target.name) {
+      try {
+        await api('/api/settings', { method: 'PATCH', body: { [e.target.name]: e.target.value } });
+        data.settings[e.target.name] = e.target.value;
+        toast('Saved');
+      } catch (err) { toast(err.message); }
+      return;
+    }
     if (e.target.id === 'bday-hourly') {
       try { await api('/api/settings', { method: 'PATCH', body: { bday_hourly: e.target.value } }); await refresh(); toast('Birthday reminders updated'); } catch (err) { toast(err.message); }
       return;

@@ -1074,7 +1074,6 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent-ink);
 .tk-progress span { display: block; height: 100%; background: var(--ok); border-radius: 4px; }
 .tk-done summary { cursor: pointer; font-weight: 600; color: var(--muted); padding: 8px 4px; }
 /* ---------- Today: one list ---------- */
-.trow .tcheck { order: 3; margin-left: 4px; }
 .trow .tx { flex: none; width: 32px; height: 32px; border-radius: 50%; border: 0; background: var(--soft); color: var(--muted); font-size: 18px; line-height: 1; }
 .late-row .when .late { font-size: 12px; font-weight: 700; }
 .tdim { color: var(--muted); font-weight: 500; font-size: 14px; }
@@ -1165,3 +1164,29 @@ a.tk-row.tk-link { text-decoration: none; color: inherit; }
 .map-link .evmark { width: 28px; height: 28px; border-radius: 8px; flex: none; background: var(--a-travel-bg, var(--soft)); color: var(--a-travel, var(--accent)); }
 .map-link b { color: var(--muted); font-weight: 400; font-size: 20px; }
 .map-link:active { opacity: .7; }
+
+/* Consistency pass: every list is [when] [checkbox] [icon] [title]; icons sit in tinted rounded squares */
+.check-ph { flex: none; width: 24px; }
+.evmark { background: var(--soft); border-radius: 8px; }
+.row .evmark { width: 30px; height: 30px; border-radius: 10px; }
+.row .evmark svg { width: 17px; height: 17px; }
+.evmark.k-med { background: var(--a-hoa-bg); }
+.evmark.k-people { background: var(--a-people-bg); }
+.evmark.k-travel { background: var(--a-travel-bg); }
+.hist-row .t .evmark, .pv-act .evmark { background: none; }
+.when.hdue { text-align: left; min-width: 0; }
+.seg3.seg2 { grid-template-columns: repeat(2, 1fr); flex: none; }
+/* Long titles in task pop-ups: same size as the person page so they don't push everything down */
+.tk-title h3 { font-size: 21px; line-height: 1.2; overflow-wrap: anywhere; }
+/* Add menu (the + button) */
+.add-menu h3 { margin: 0 0 2px; }
+.add-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.add-kind { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 6px 14px; border: 0; border-radius: 16px; background: var(--card); color: var(--fg); font-weight: 600; font-size: 14px; }
+.add-kind .evmark { width: 40px; height: 40px; border-radius: 12px; }
+.add-kind .evmark svg { width: 21px; height: 21px; }
+.add-kind:active { opacity: .7; }
+.add-quick { display: grid; gap: 6px; margin-top: 4px; }
+.add-quick span { font-size: 13px; font-weight: 600; color: var(--muted); padding-left: 4px; }
+.add-quick input { width: 100%; border: 0; background: var(--card); border-radius: 14px; padding: 12px 14px; font-size: 16px; min-height: 48px; }
+.add-parsed { padding: 0 2px; }
+.no-when .when.hdue { display: block; }
