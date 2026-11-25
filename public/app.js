@@ -298,6 +298,7 @@ import * as TK from './tasks.js';
 
   // One icon slot per row type so This week (and the day view) scan easily.
   const KIND_ICONS = {
+    pin: '<path d="M12 21s-7-6.2-7-12a7 7 0 0 1 14 0c0 5.8-7 12-7 12z"/><circle cx="12" cy="9" r="2.5"/>',
     phone: '<path d="M5 4h4l2 5l-2.5 1.5a11 11 0 0 0 5 5l1.5 -2.5l5 2v4a2 2 0 0 1 -2 2a16 16 0 0 1 -15 -15a2 2 0 0 1 2 -2"/>',
     people: '<circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4v2"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M21 21v-2a4 4 0 0 0 -3 -3.85"/>',
     calendar: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/>',
@@ -2472,6 +2473,10 @@ import * as TK from './tasks.js';
 
   // Settings for a synced calendar event. Saved by title (all of them) or for
   // just this one, so they survive every calendar sync.
+  // Apple Maps: the maps: link opens the Maps app on iPhone/iPad; elsewhere the web page.
+  const mapsUrl = (q) => `${/iPhone|iPad|Macintosh/.test(navigator.userAgent) && 'ontouchend' in document ? 'maps://' : 'https://maps.apple.com/'}?q=${encodeURIComponent(q.replace(/\s*\n\s*/g, ', '))}`;
+  const mapLink = (loc) => `<a class="map-link" href="${esc(mapsUrl(loc))}"${mapsUrl(loc).startsWith('https') ? ' target="_blank" rel="noopener"' : ''}>${kindMark('pin')}<span>${esc(loc).replace(/\n/g, '<br>')}</span><b aria-hidden="true">›</b></a>`;
+
   function openEvent(e) {
     if (!e) return;
     const prefs = Object.fromEntries((data.event_prefs || []).map((r) => [r.key, r]));
@@ -2486,7 +2491,9 @@ import * as TK from './tasks.js';
     const startScope = prefs[e.one] ? 'one' : 'all';
     sheet.innerHTML = `<form method="dialog">
       <h3>${esc(e.title)}</h3>
-      <p class="sub">${esc(when)}${e.location ? ` · ${esc(e.location)}` : ''}<br>From your calendar. Change the event itself in Apple Calendar; these settings are just for this app and survive every sync.</p>
+      <p class="sub">${esc(when)}</p>
+      ${e.location ? mapLink(e.location) : ''}
+      <p class="sub">From your calendar. Change the event itself in Apple Calendar; these settings are just for this app and survive every sync.</p>
       <div class="filters" role="radiogroup" aria-label="Apply to">
         <button type="button" data-scope="all" aria-pressed="${startScope === 'all'}">All “${esc(e.title.length > 24 ? e.title.slice(0, 22) + '…' : e.title)}” events</button>
         <button type="button" data-scope="one" aria-pressed="${startScope === 'one'}">Just this one</button>
