@@ -1156,8 +1156,7 @@ a.tk-row.tk-link { text-decoration: none; color: inherit; }
 .map-link b { color: var(--muted); font-weight: 400; font-size: 20px; }
 .map-link:active { opacity: .7; }
 
-/* Consistency pass: every list is [when] [checkbox] [icon] [title]; icons sit in tinted rounded squares */
-.check-ph { flex: none; width: 24px; }
+/* Consistency pass: every list is [when] [icon] [title] [checkbox]; icons sit in tinted rounded squares */
 .evmark { background: var(--soft); border-radius: 8px; }
 .row .evmark { width: 30px; height: 30px; border-radius: 10px; }
 .row .evmark svg { width: 17px; height: 17px; }
@@ -1181,3 +1180,4 @@ a.tk-row.tk-link { text-decoration: none; color: inherit; }
 .add-quick input { width: 100%; border: 0; background: var(--card); border-radius: 14px; padding: 12px 14px; font-size: 16px; min-height: 48px; }
 .add-parsed { padding: 0 2px; }
 .no-when .when.hdue { display: block; }
+.row .check { margin-left: 4px; }

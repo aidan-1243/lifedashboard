@@ -298,11 +298,12 @@ import * as TK from './tasks.js';
     const swipe = !done && it.kind === 'task';
     return `<li class="row${swipe ? ' sw' : ''}"${swipe ? ` data-swipe="${it.id}"` : ''}><div class="row-inner">
       ${when !== null ? `<span class="when">${esc(when)}</span>` : ''}
-      <button type="button" class="check${done ? ' done' : ''}" data-act="${done ? 'reopen' : 'done'}" data-id="${it.id}" aria-label="${done ? 'Mark not done' : 'Mark done'}: ${esc(it.title)}"></button>${it.trip_id || it.source === 'wayfare' ? kindMark('suitcase', 'k-trip') : kindMark('check', 'k-task')}
+      ${it.trip_id || it.source === 'wayfare' ? kindMark('suitcase', 'k-trip') : kindMark('check', 'k-task')}
       <button type="button" class="row-main" data-act="edit" data-id="${it.id}">
         <div class="t${done ? ' done-t' : ''}">${esc(it.title)}</div>
         <div class="meta">${itemMeta(it, { skipDue })}</div>
       </button>
+      <button type="button" class="check${done ? ' done' : ''}" data-act="${done ? 'reopen' : 'done'}" data-id="${it.id}" aria-label="${done ? 'Mark not done' : 'Mark done'}: ${esc(it.title)}"></button>
     </div></li>`;
   }
 
@@ -406,8 +407,9 @@ import * as TK from './tasks.js';
       const swipe = done || later;
       return `<li class="row trow${late ? ' late-row' : ''}${swipe ? ' sw' : ''}"${swipe ? ` data-swipe="row" data-kind="trow" data-later="${esc(later ? later.label : 'Later')}"` : ''}><div class="row-inner">
       <span class="when">${late ? '<span class="late">Late</span>' : esc(when)}</span>
-      ${done ? `<button type="button" class="check tcheck" ${done.attrs} aria-label="${esc(done.label)}"></button>` : '<span class="check-ph" aria-hidden="true"></span>'}${kindMark(icon, cls)}
+${kindMark(icon, cls)}
       <button type="button" class="row-main" ${open}><div class="t t2">${title}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button>
+      ${done ? `<button type="button" class="check tcheck" ${done.attrs} aria-label="${esc(done.label)}"></button>` : ''}
       ${dismiss ? `<button type="button" class="tx" ${dismiss} aria-label="Hide for today">×</button>` : ''}
       ${later ? `<button type="button" class="tlater" ${later.attrs} hidden aria-label="${esc(later.label)}"></button>` : ''}</div></li>`;
     };
@@ -1038,12 +1040,12 @@ import * as TK from './tasks.js';
     if (ui.homeSelect) {
       const on = ui.homeSelect.has(t.id);
       return `<li class="row hrow${on ? ' picked' : ''}"><div class="row-inner">
-        ${due}<button type="button" class="check${on ? ' done' : ''}" data-act="home-pick" data-id="${t.id}" aria-pressed="${on}" aria-label="Select ${esc(t.name)}"></button>${icon}
-        <button type="button" class="row-main" data-act="home-pick" data-id="${t.id}">${title}</button></div></li>`;
+        ${due}${icon}<button type="button" class="row-main" data-act="home-pick" data-id="${t.id}">${title}</button>
+        <button type="button" class="check${on ? ' done' : ''}" data-act="home-pick" data-id="${t.id}" aria-pressed="${on}" aria-label="Select ${esc(t.name)}"></button></div></li>`;
     }
     return `<li class="row sw hrow" data-swipe="${t.id}" data-kind="home"><div class="row-inner">
-      ${due}<button type="button" class="check" data-act="home-done" data-id="${t.id}" aria-label="Done today: ${esc(t.name)}"></button>${icon}
-      <button type="button" class="row-main" data-act="home-open" data-id="${t.id}">${title}</button>
+      ${due}${icon}<button type="button" class="row-main" data-act="home-open" data-id="${t.id}">${title}</button>
+      <button type="button" class="check" data-act="home-done" data-id="${t.id}" aria-label="Done today: ${esc(t.name)}"></button>
     </div></li>`;
   }
 
@@ -2027,10 +2029,10 @@ import * as TK from './tasks.js';
   function rwCredRow(x, { when = true } = {}) {
     const { c, b, left, cap } = x;
     return `<li class="row">${when ? `<span class="when">${esc(rwDate(x.info.end))}</span>` : ''}
-      <button type="button" class="check" data-act="rw-use-all" data-card="${esc(c.id)}" data-ben="${esc(b.id)}" aria-label="Mark ${esc(RW.money(left))} of ${esc(b.name)} used"></button>
       <button type="button" class="row-main" data-act="rw-ben" data-card="${esc(c.id)}" data-ben="${esc(b.id)}">
         <div class="t">${esc(b.name)} · ${esc(RW.money(left))}${left < cap - 0.004 ? ` <span class="rw-of">of ${esc(RW.money(cap))}</span>` : ''}</div>
-        <div class="meta">${esc(rwOwner(c))}'s ${esc(c.name)}${when ? ` · ${esc(rwDays(x.days))}` : ''}</div></button></li>`; // grouped rows: the heading already says when
+        <div class="meta">${esc(rwOwner(c))}'s ${esc(c.name)}${when ? ` · ${esc(rwDays(x.days))}` : ''}</div></button>
+      <button type="button" class="check" data-act="rw-use-all" data-card="${esc(c.id)}" data-ben="${esc(b.id)}" aria-label="Mark ${esc(RW.money(left))} of ${esc(b.name)} used"></button></li>`; // grouped rows: the heading already says when
   }
 
   // Credits: every credit with money left, grouped by when it runs out; then certificates
