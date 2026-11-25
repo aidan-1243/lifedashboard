@@ -532,7 +532,7 @@ import * as TK from './tasks.js';
     // Today's late block: overdue tasks (nagging ones first), then overdue Home tasks
     const lateRows = [
       ...missedDoses.map(({ m, slot }) => trow({ late: true, icon: 'pill', cls: 'k-med', title: `${esc(m.name)}${m.dose ? ` <span class="tdim">${esc(m.dose)}</span>` : ''}`,
-        meta: `Not logged · yesterday ${esc(fmtSlot(slot))}`, open: `data-act="med-open" data-id="${m.id}"`,
+        meta: `Not logged · yesterday ${esc(fmtSlot(slot))}`, open: `data-act="med-open" data-id="${m.id}" data-date="${yday}" data-slot="${slot}"`,
         done: { attrs: `data-act="med-take" data-id="${m.id}" data-slot="${slot}" data-date="${yday}"`, label: `Took it yesterday: ${m.name}` },
         later: { attrs: `data-act="med-skip" data-id="${m.id}" data-slot="${slot}" data-date="${yday}"`, label: 'Missed it' } })),
       ...overdue.map((i) => { const [ic, cl] = itemIcon(i); return trow({ late: true, icon: ic, cls: cl, title: esc(i.title), meta: `${esc(overdueText(i.due_at))}${isNagging(i) ? ` · ${{ hourly: 'hourly', daily: 'daily', weekly: 'weekly' }[i.nag]}` : ''}${i.area ? ` · ${esc(AREAS[i.area] || '')}` : ''}`,
@@ -733,6 +733,10 @@ import * as TK from './tasks.js';
     const list = TK.occurrencesOn(t, today).map((tm) => ({ date: today, time: tm, key: TK.occKey(today, tm) }));
     if (list.length) { const o = list.find((x) => !logs.get(x.key)) || list[list.length - 1]; return { ...o, log: logs.get(o.key) || null }; }
     if ((!t.repeat || t.repeat === 'never') && t.date) { const key = TK.occKey(t.date, t.time || ''); return { date: t.date, time: t.time || '', key, log: logs.get(key) || null }; }
+    if (t.kind === 'med') { // yesterday's dose that was never logged comes before the next one
+      const y = TK.addDays(today, -1); const tm = TK.occurrencesOn(t, y).find((x) => !logs.get(TK.occKey(y, x)));
+      if (tm) return { date: y, time: tm, key: TK.occKey(y, tm), log: null, late: true };
+    }
     if (t.kind === 'birthday' || t.kind === 'pdate') {
       for (let i = 1; i <= 3; i++) { const d = TK.addDays(today, -i); if (TK.isDueOn(t, d)) { const key = TK.occKey(d, ''); if (!logs.get(key)) return { date: d, time: '', key, log: null, late: true }; break; } }
     }
@@ -754,16 +758,16 @@ import * as TK from './tasks.js';
       status === 'undo' ? null : async () => { await api(`/api/tasks/${t.id}/log`, { body: { occ: occ.key, status: 'undo' } }); await refresh(); });
   }
 
-  function openTask(t0) {
+  function openTask(t0, { occ: forcedOcc = null } = {}) {
     const isNew = !t0.id;
     const t = { kind: 'task', repeat: 'never', nag: 0, nag_mode: 'hourly', date: todayYmd(), time: null, details: {}, ...t0 };
     const details = t.details || {};
-    const occ = isNew ? null : taskOcc(t);
+    const occ = isNew ? null : forcedOcc || taskOcc(t);
     const st = isNew ? { current: 0, best: 0 } : streakOf(t);
     const isPeople = PEOPLE_KINDS.includes(t.kind);
     const person = isPeople && details.person_id ? data.people.find((x) => x.id === details.person_id) : null;
     const done = occ && occ.log && occ.log.status !== 'skipped';
-    const mainLabel = details.source === 'wayfare' ? 'Booked' : TASK_MAIN[t.kind] || 'Done';
+    const mainLabel = details.source === 'wayfare' ? 'Booked' : t.kind === 'med' && occ && occ.future ? `Taken early (for ${dayLabel(occ.date)})` : t.kind === 'med' && occ && occ.late ? `Took it ${occ.date === TK.addDays(todayYmd(), -1) ? 'yesterday' : dayLabel(occ.date)}` : TASK_MAIN[t.kind] || 'Done';
     const status = isNew ? '' : !t.date ? (done ? 'No date · done' : 'No date') : occ ? `${occ.future ? 'Next: ' : occ.late ? 'Late · ' : ''}${dayLabel(occ.date)}${occ.time ? ` ${fmtSlot(occ.time)}` : ''}${done ? ' · done' : occ.log ? ' · skipped' : ''}` : 'Finished';
     // Custom repeat uses the same chip picker as medications
     const cst = medState({ id: t.repeat === 'custom' ? 1 : 0, ...(t.repeat === 'custom' && t.custom ? { freq: t.custom.freq, interval_n: t.custom.interval_n, weekdays: t.custom.weekdays, month_days: t.custom.month_days, times: t.custom.times || t.time || '08:00', dose_times: t.custom.dose_times ? JSON.stringify(t.custom.dose_times) : null } : { times: t.time || '08:00' }), start_date: t.date || todayYmd() });
@@ -3363,7 +3367,9 @@ import * as TK from './tasks.js';
       }
       else if (act === 'med-take') await logMed(id, el.dataset.slot, 'taken', el.dataset.date || todayYmd());
       else if (act === 'med-undo') { if (confirm('Undo this dose?')) await logMed(id, el.dataset.slot, 'undo'); }
-      else if (act === 'med-open') { const t = taskById(id); if (t) openTask(t); }
+      else if (act === 'med-open') { const t = taskById(id); if (!t) return;
+        if (el.dataset.date && el.dataset.slot) { const key = TK.occKey(el.dataset.date, el.dataset.slot); openTask(t, { occ: { date: el.dataset.date, time: el.dataset.slot, key, log: taskLog(t).find((l) => l.occ === key) || null, late: true } }); }
+        else openTask(t); }
       else if (act === 'med-new') openTask({ kind: 'med', repeat: 'daily', time: '08:00', nag: 1, nag_mode: 'hourly' });
       else if (act === 'wrap-move') {
         const ids = el.dataset.ids.split(',').map(Number);
