@@ -529,7 +529,6 @@ import * as TK from './tasks.js';
         <span class="summary">${esc(summary)}</span>
       </header>
       ${viewWeather()}
-      ${viewFocusBanner()}
       <div class="week" role="list" aria-label="Next 7 days">${days}</div>
       ${viewSetup()}
       <section aria-label="Today">${head(`Today <span class="n">${todayRows.length || ''}</span>`, { key: 'rest' })}
@@ -764,7 +763,6 @@ import * as TK from './tasks.js';
         ${(data.trips || []).length || details.trip_id ? `<label class="tk-row"><span>Trip</span><select name="trip_id">${opt([['', 'None'], ...(data.trips || []).map((tr) => [tr.id, tr.name])], details.trip_id || '')}</select></label>` : ''}
         ${sw('top3', !!details.top3, 'Top 3 today')}` : ''}
       </div>
-      ${t.kind === 'task' && !isNew && occ && !done ? '<div class="btns2 tk-focus"><button type="button" class="pbtn" data-focus-min="25">Focus 25 min</button><button type="button" class="pbtn" data-focus-min="50">Focus 50 min</button></div>' : ''}
       `}${isPeople ? '' : `<div class="lbl">Schedule</div>
       <div class="tk-group">
         ${sw('has_date', !!t.date, `${kindMark('calendar')} Date`)}
@@ -826,7 +824,6 @@ import * as TK from './tasks.js';
         else if (a === 'remove') { if (!confirm(`Delete "${t.title}"? Its history is kept in backups.`)) return; await api(`/api/tasks/${t.id}`, { method: 'DELETE' }); sheet.close(); await refresh(); toast('Deleted'); }
       } catch (err) { toast(err.message); }
     }; });
-    form.querySelectorAll('[data-focus-min]').forEach((b) => { b.onclick = async () => { sheet.close(); await startFocus(t.id, +b.dataset.focusMin); }; });
     form.querySelectorAll('[data-tkdel]').forEach((b) => { b.onclick = async () => {
       try { await api(`/api/tasks/${t.id}/log`, { body: { occ: b.dataset.tkdel, status: 'undo' } }); await refresh(); openTask(taskById(t.id)); } catch (err) { toast(err.message); }
     }; });
@@ -892,53 +889,7 @@ import * as TK from './tasks.js';
     showSheet();
   }
 
-  // ---------- focus mode ----------
-  let focusTimer = null;
-  let focusHidden = false;
-  const focusActive = () => data.settings.focus_until && Date.parse(data.settings.focus_until) > Date.now();
-  function viewFocusBanner() {
-    if (!focusActive()) return '';
-    return `<button type="button" class="focus-banner" data-act="focus-open">Focusing · nags paused until ${esc(fmtTime(data.settings.focus_until))} ›</button>`;
-  }
 
-  function renderFocusOverlay() {
-    let el = document.getElementById('focus');
-    if (!focusActive()) { if (el) el.remove(); clearInterval(focusTimer); focusTimer = null; return; }
-    if (!el) { el = document.createElement('div'); el.id = 'focus'; el.className = 'focus'; document.body.appendChild(el); }
-    const item = data.items.find((i) => String(i.id) === String(data.settings.focus_item));
-    const left = Math.max(0, Date.parse(data.settings.focus_until) - Date.now());
-    const mm = Math.floor(left / 60000), ss = Math.floor(left / 1000) % 60;
-    el.innerHTML = `<div class="focus-inner" role="dialog" aria-label="Focus mode">
-      <span class="label">Focus · nags paused</span>
-      <h2>${esc(item ? item.title : 'Deep work')}</h2>
-      <div class="clock" aria-live="off">${mm}:${String(ss).padStart(2, '0')}</div>
-      <div class="btns2">
-        ${item ? `<button type="button" class="btn accent" data-focus="done">Done</button>` : ''}
-        <button type="button" class="btn" data-focus="stop">${item ? 'Stop' : 'End focus'}</button>
-      </div>
-      <button type="button" class="link" data-focus="hide" style="text-align:center;color:var(--muted)">Hide timer</button>
-    </div>`;
-    el.querySelector('[data-focus="stop"]').onclick = () => endFocus();
-    const doneBtn = el.querySelector('[data-focus="done"]');
-    if (doneBtn) doneBtn.onclick = async () => { await endFocus(); await markDone(item.id); };
-    el.hidden = focusHidden;
-    el.querySelector('[data-focus="hide"]').onclick = () => { focusHidden = true; el.hidden = true; };
-    if (!focusTimer) focusTimer = setInterval(() => {
-      if (!focusActive()) { clearInterval(focusTimer); focusTimer = null; toast('Focus session done'); refresh().catch(() => {}); return; }
-      const box = document.getElementById('focus');
-      if (box) { const l = Date.parse(data.settings.focus_until) - Date.now(); const c = box.querySelector('.clock'); if (c) c.textContent = `${Math.floor(l / 60000)}:${String(Math.floor(l / 1000) % 60).padStart(2, '0')}`; }
-    }, 1000);
-  }
-
-  async function startFocus(itemId, minutes = 25) {
-    focusHidden = false;
-    data.settings = await api('/api/focus', { body: { minutes, item_id: itemId || null } });
-    render();
-  }
-  async function endFocus() {
-    data.settings = await api('/api/focus', { method: 'DELETE' });
-    render();
-  }
 
   // ---------- meals ----------
   const MEAL_KINDS = { cook: 'Cooking', out: 'Eating out', leftovers: 'Leftovers', skip: 'No dinner needed' };
@@ -1948,8 +1899,7 @@ import * as TK from './tasks.js';
       <div class="setting">
         <strong>Habits</strong>
         <p>${myHabits().length ? esc(myHabits().map((h) => h.title).join(', ')) : 'None yet. Add a few small daily things to check off on Today.'}</p>
-        <div class="btns"><button type="button" class="btn ghost" data-act="edit-habits">${myHabits().length ? 'Edit habits' : 'Add habits'}</button>
-        <button type="button" class="btn ghost" data-act="focus-free" data-min="25">Start a 25-min focus</button></div>
+        <div class="btns"><button type="button" class="btn ghost" data-act="edit-habits">${myHabits().length ? 'Edit habits' : 'Add habits'}</button></div>
       </div>
       <div class="setting">
         <strong>Medications</strong>
@@ -2475,7 +2425,6 @@ import * as TK from './tasks.js';
     const focusId = document.activeElement && document.activeElement.id;
     const caret = document.activeElement && document.activeElement.selectionStart;
     app.innerHTML = { today: viewToday, all: viewAll, home: viewHome, people: viewPeople, rewards: viewRewards, settings: viewSettings, meals: viewMeals }[v]();
-    renderFocusOverlay();
     if (focusId === 'psearch' || focusId === 'allsearch' || focusId === 'hsearch') { const el = document.getElementById(focusId); if (el) { el.focus(); el.setSelectionRange(caret, caret); } }
   }
 
@@ -3345,8 +3294,6 @@ import * as TK from './tasks.js';
         toast(`Moved ${plural(ids.length, 'item')} to tomorrow 9am`, undo);
       } else if (act === 'wrap-review') { location.hash = '#all'; }
       else if (act === 'unhide') { await api('/api/event-prefs', { body: { key: el.dataset.key, ...JSON.parse(el.dataset.keep || '{}'), hidden: null } }); await refresh(); toast('Showing it again'); }
-      else if (act === 'focus-open') { focusHidden = false; render(); }
-      else if (act === 'focus-free') await startFocus(null, +el.dataset.min || 25);
       else if (act === 'locate') {
         if (!navigator.geolocation) { toast('Location is not available in this browser'); return; }
         toast('Finding your location…');

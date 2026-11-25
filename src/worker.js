@@ -550,18 +550,6 @@ async function handleApi(req, env, url, ctx, uid) {
   // Weather (US National Weather Service; cached for an hour)
   if (path === '/api/weather' && method === 'GET') return json(await getWeather(env));
 
-  // Focus mode: pause nags for a while
-  if (path === '/api/focus' && method === 'POST') {
-    const minutes = Math.min(180, Math.max(5, +(body && body.minutes) || 25));
-    await setSetting(env, 'focus_until', new Date(Date.now() + minutes * 60000).toISOString(), uid);
-    await setSetting(env, 'focus_item', (body && body.item_id) ? String(+body.item_id) : '', uid);
-    return json(await getSettings(env, uid));
-  }
-  if (path === '/api/focus' && method === 'DELETE') {
-    await setSetting(env, 'focus_until', '', uid);
-    await setSetting(env, 'focus_item', '', uid);
-    return json(await getSettings(env, uid));
-  }
 
   // Gift ideas (close circle)
   if (path === '/api/gifts' && method === 'POST') {
@@ -1208,7 +1196,6 @@ async function runCronFor(env, uid, { force, tz, now, local }) {
     if (left) report.sent.push('meal-nudge');
   }
   if (quiet) return report;
-  if (s.focus_until && Date.parse(s.focus_until) > now.getTime()) { report.focus = true; return report; }
 
   // Everyday tasks whose reminders go to you (yours, or ones set to remind you / both of you).
   //   nag off: one alert at the due time (9am for date-only), unless it's set to stay silent
