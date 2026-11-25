@@ -1168,16 +1168,18 @@ a.tk-row.tk-link { text-decoration: none; color: inherit; }
 .seg3.seg2 { grid-template-columns: repeat(2, 1fr); flex: none; }
 /* Long titles in task pop-ups: same size as the person page so they don't push everything down */
 .tk-title h3 { font-size: 21px; line-height: 1.2; overflow-wrap: anywhere; }
-/* Add menu (the + button) */
+/* Add menu (the + button): quick task box on top, then the six kinds */
+.sheet form.add-menu { padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
 .add-menu h3 { margin: 0 0 2px; }
+.add-quick { display: flex; align-items: center; gap: 8px; background: var(--card); border-radius: 26px; padding: 0 6px 0 16px; min-height: 52px; }
+.add-quick input { flex: 1; min-width: 0; border: 0; background: none; font-size: 16px; padding: 12px 0; }
+.add-quick input:focus { outline: none; }
+.add-quick:focus-within { box-shadow: 0 0 0 2px var(--accent); }
+.add-go { flex: none; width: 40px; height: 40px; border-radius: 50%; border: 0; background: var(--accent); color: var(--on-accent); display: flex; align-items: center; justify-content: center; }
+.add-go:disabled { background: var(--soft); color: var(--muted); }
+.add-parsed { padding: 0 4px; margin-top: -6px; }
 .add-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .add-kind { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 6px 14px; border: 0; border-radius: 16px; background: var(--card); color: var(--fg); font-weight: 600; font-size: 14px; }
 .add-kind .evmark { width: 40px; height: 40px; border-radius: 12px; }
 .add-kind .evmark svg { width: 21px; height: 21px; }
 .add-kind:active { opacity: .7; }
-.add-quick { display: grid; gap: 6px; margin-top: 4px; }
-.add-quick span { font-size: 13px; font-weight: 600; color: var(--muted); padding-left: 4px; }
-.add-quick input { width: 100%; border: 0; background: var(--card); border-radius: 14px; padding: 12px 14px; font-size: 16px; min-height: 48px; }
-.add-parsed { padding: 0 2px; }
-.no-when .when.hdue { display: block; }
-.row .check { margin-left: 4px; }

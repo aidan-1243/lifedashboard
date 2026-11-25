@@ -49,11 +49,25 @@ import * as TK from './tasks.js';
     // Every × and Close/Cancel button closes the sheet unless the sheet set its own handler
     sheet.querySelectorAll('.sheet-x, [data-sheet="close"]').forEach((b) => { if (!b.onclick) b.onclick = () => sheet.close(); });
     sheet.dataset.dirty = '';
+    lockPage();
     if (!sheet.open) sheet.showModal();
     // Don't pop the keyboard: focus the sheet itself, not its first text box.
     if (document.activeElement && document.activeElement !== sheet) document.activeElement.blur();
     sheet.focus({ preventScroll: true });
     sheet.scrollTop = 0;
+  }
+  // While a sheet is open the page behind it stays put: pin the body where it is, put it back on close.
+  let lockedY = null;
+  function lockPage() {
+    if (lockedY !== null) return;
+    lockedY = window.scrollY;
+    Object.assign(document.body.style, { position: 'fixed', top: `-${lockedY}px`, left: '0', right: '0', width: '100%' });
+  }
+  function unlockPage() {
+    if (lockedY === null) return;
+    const y = lockedY; lockedY = null;
+    Object.assign(document.body.style, { position: '', top: '', left: '', right: '', width: '' });
+    window.scrollTo(0, y);
   }
   const sheetDirty = () => sheet.dataset.dirty === '1';
   const okToClose = () => !sheetDirty() || confirm('Discard your changes?');
@@ -62,7 +76,7 @@ import * as TK from './tasks.js';
   sheet.addEventListener('input', (e) => { if (!e.target.closest('#p-extras') && e.target.type !== 'search') sheet.dataset.dirty = '1'; });
   sheet.addEventListener('change', (e) => { if (!e.target.closest('#p-extras') && e.target.type !== 'search' && e.target.type !== 'file') sheet.dataset.dirty = '1'; });
   sheet.addEventListener('submit', () => { sheet.dataset.dirty = ''; }, true);
-  sheet.addEventListener('close', () => { sheet.dataset.dirty = ''; });
+  sheet.addEventListener('close', () => { sheet.dataset.dirty = ''; if (!sheet.open) unlockPage(); }); // (fires late: another sheet may already be open)
   // Cancel / Close / × buttons: confirm before throwing away typing
   sheet.addEventListener('click', (e) => {
     const closer = e.target.closest('[data-sheet="close"]');
@@ -2908,9 +2922,12 @@ ${kindMark(icon, cls)}
   function openAddMenu() {
     sheet.innerHTML = `<form method="dialog" class="add-menu">
       <h3>Add</h3>
-      <div class="add-grid">${ADD_KINDS.map(([k, label, icon, cls]) => `<button type="button" class="add-kind" data-add="${k}">${kindMark(icon, cls)}<span>${label}</span></button>`).join('')}</div>
-      <label class="add-quick"><span>Or type a quick task</span><input name="quick" placeholder="e.g. Call the dentist Friday 2pm" autocomplete="off" enterkeyhint="done"></label>
+      <div class="add-quick">
+        <input name="quick" placeholder="Quick task, e.g. Dentist Fri 2pm" aria-label="Quick task" autocomplete="off" enterkeyhint="done">
+        <button type="submit" class="add-go" aria-label="Add this task" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+      </div>
       <div class="parsed add-parsed"></div>
+      <div class="add-grid">${ADD_KINDS.map(([k, label, icon, cls]) => `<button type="button" class="add-kind" data-add="${k}">${kindMark(icon, cls)}<span>${label}</span></button>`).join('')}</div>
     </form>`;
     const form = sheet.querySelector('form');
     form.addEventListener('click', (e) => {
@@ -2924,7 +2941,8 @@ ${kindMark(icon, cls)}
       else if (k === 'credit') openAddCredit();
     });
     const quick = form.quick, tags = form.querySelector('.add-parsed');
-    quick.addEventListener('input', () => { const v = quick.value.trim(); tags.innerHTML = v ? parsedTags(parseCapture(v, data.people)) : ''; });
+    const go = form.querySelector('.add-go');
+    quick.addEventListener('input', () => { const v = quick.value.trim(); tags.innerHTML = v ? parsedTags(parseCapture(v, data.people)) : ''; go.disabled = !v; });
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const raw = quick.value.trim(); if (!raw) return;
