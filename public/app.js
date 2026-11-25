@@ -405,7 +405,7 @@ import * as TK from './tasks.js';
     const at = (d, hhmm) => { const [hh, mm] = hhmm.split(':').map(Number); const x = parseDay(d); x.setHours(hh, mm, 0, 0); return +x; };
     const KIND_ORDER = { late: 0, birthday: 1, pdate: 2, credit: 3, event: 4, home: 5, habit: 6, item: 7 };
     const itemIcon = (i) => (i.trip_id || i.source === 'wayfare' ? ['suitcase', 'k-trip'] : ['check', 'k-task']);
-    const homeTasks = (data.home_tasks || []).map((t) => ({ t, i: homeInfo(t) })).filter((x) => !x.i.completed && !x.i.snoozed);
+    const homeTasks = (data.home_tasks || []).map((t) => ({ t, i: homeInfo(t) })).filter((x) => !x.i.completed); // snoozed ones show on their new due day
     const myCreditsOpen = (() => { if (!data.rewards || !data.me) return []; const ctx = rwCtx(); return RW.openCredits(ctx, ctx.cards.filter((c) => c.owner === data.me.id)).filter((x) => x.dated); })();
     const peopleTasks = (data.tasks || []).filter((t) => (t.kind === 'birthday' || t.kind === 'pdate') && !t.archived);
 
@@ -546,7 +546,7 @@ import * as TK from './tasks.js';
   function viewTripCard(open) {
     const today = startOfDay();
     const trips = (data.trips || []).filter((t) => parseDay(t.end_date || t.start_date) >= today)
-      .sort((a, b) => (a.start_date < b.start_date ? -1 : 1)).slice(0, 5);
+      .sort((a, b) => (a.start_date < b.start_date ? -1 : 1)).slice(0, 3);
     if (!trips.length) return '';
     const warns = new Map(); // document -> trips it may not cover
     const rows = trips.map((trip) => {
@@ -1071,7 +1071,7 @@ import * as TK from './tasks.js';
   function homeRow(t, info) {
     const icon = `<span class="ricon sm" title="${esc(t.room || '')}">${roomIcon(t.room)}</span>`;
     const due = `<span class="hdue ${info.cls}">${esc(shortDue(info))}</span>`;
-    const title = `<div class="t t2">${esc(t.name)}</div>${info.snoozed ? '<div class="meta">snoozed</div>' : ''}`;
+    const title = `<div class="t t2">${esc(t.name)}</div>${info.snoozed ? '<div class="meta">Snoozed</div>' : ''}`;
     if (ui.homeSelect) {
       const on = ui.homeSelect.has(t.id);
       return `<li class="row hrow${on ? ' picked' : ''}"><div class="row-inner">
@@ -1866,11 +1866,11 @@ import * as TK from './tasks.js';
       rows = list.filter((p) => p.circle === ui.peopleFilter).map((p) => {
         const g = (data.gifts || []).filter((x) => x.person_id === p.id && x.status === 'idea').length;
         const b = birthdayIn(p.birthday);
-        return personRow(p, [CIRCLES[p.circle], b ? `birthday in ${b.days} days` : '', g ? plural(g, 'gift idea') : ''].filter(Boolean).join(' · '));
+        return personRow(p, [CIRCLES[p.circle], b ? `birthday ${b.days === 0 ? 'today' : `in ${b.days} day${b.days === 1 ? '' : 's'}`}` : '', g ? plural(g, 'gift idea') : ''].filter(Boolean).join(' · '));
       });
     } else if (ui.peopleFilter === 'birthdays' && !q) {
       rows = list.map((p) => ({ p, b: birthdayIn(p.birthday) })).filter((x) => x.b).sort((a, b) => a.b.days - b.b.days)
-        .map((x) => personRow(x.p, (x.b.days === 0 ? 'Today' : `${x.b.date.toLocaleDateString([], { month: 'short', day: 'numeric' })} · in ${x.b.days} days${x.b.turns ? ` · turns ${x.b.turns}` : ''}`) + (x.p.bday_notify === 0 ? ' · hidden from Today' : '')));
+        .map((x) => personRow(x.p, (x.b.days === 0 ? 'Today' : `${x.b.date.toLocaleDateString([], { month: 'short', day: 'numeric' })} · in ${x.b.days} day${x.b.days === 1 ? '' : 's'}${x.b.turns ? ` · turns ${x.b.turns}` : ''}`) + (x.p.bday_notify === 0 ? ' · hidden from Today' : '')));
       // Everyone without a birthday, at the end, so gaps are easy to fill in
       missing = list.filter((p) => !birthdayIn(p.birthday)).map((p) => personRow(p, [p.circle ? CIRCLES[p.circle] : '', 'tap to add a birthday'].filter(Boolean).join(' · ')));
     } else {
@@ -2014,7 +2014,8 @@ import * as TK from './tasks.js';
   const RW_ARTS = ['platinum', 'gold', 'graphite', 'palladium', 'brilliant', 'sapphire', 'freedom', 'ihg', 'discover', 'atmos', 'deltagold', 'venturex', 'prime', 'slate'];
   const rwChip = (c, cls = '') => `<span class="rw-chip art-${RW_ARTS.includes(c.art) ? c.art : 'slate'} ${cls}" aria-hidden="true"><b>${esc(c.mark || '')}</b></span>`;
   const rwDate = (d) => `${RW.MONTHS[d.getMonth()]} ${d.getDate()}`;
-  const rwDays = (n) => (n <= 1 ? 'last day' : `${n} days left`);
+  // RW.daysLeft counts today (the last day = 1); show it the way People and Today count ("in 6 days")
+  const rwDays = (n) => { const d = n - 1; return d <= 0 ? 'last day' : d === 1 ? 'ends tomorrow' : `${d} days left`; };
   const rwPill = (v) => `<span class="rw-pill ${v.k}">${esc(v.label)}</span>`;
   const RW_TABS = [['cards', 'Cards'], ['use', 'Credits'], ['points', 'Points']];
 
@@ -3298,7 +3299,14 @@ import * as TK from './tasks.js';
     } catch (err) { toast(err.message); }
   });
 
+  let lastHash = location.hash;
   window.addEventListener('hashchange', () => {
+    // Changing tabs closes any open sheet (asking first if it has unsaved typing)
+    if (sheet.open) {
+      if (!okToClose()) { window.history.replaceState(null, '', lastHash || '#today'); return; } // (`history` here is the undo list)
+      sheet.close();
+    }
+    lastHash = location.hash;
     if (currentView() === 'people') { ui.peopleFilter = 'birthdays'; ui.peopleQuery = ''; } // People always opens on Birthdays
     render(); window.scrollTo(0, 0);
   });
@@ -3329,7 +3337,24 @@ import * as TK from './tasks.js';
     try { weatherAt = 0; await refresh(); } catch (_) { /* toast shown elsewhere */ }
     ptr.classList.remove('show'); ptr.style.transform = '';
   });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && loaded) refresh().catch(() => {}); });
+  // iPhone keeps Life running in the background, so reopening it doesn't reload the page.
+  // When it comes back, check whether the app's files changed (by their ETag) and reload if so.
+  const APP_FILES = ['/app.js', '/style.css', '/tasks.js', '/home.js', '/meds.js', '/rewards.js', '/parse.js', '/theme.js', '/vcard.js'];
+  const appVersion = () => Promise.all(APP_FILES.map((u) => fetch(u, { method: 'HEAD', cache: 'no-store', redirect: 'manual' })
+    .then((r) => r.headers.get('etag') || '').catch(() => ''))).then((xs) => (xs.every(Boolean) ? xs.join('|') : ''));
+  let bootVersion = '', versionAt = 0;
+  appVersion().then((v) => { bootVersion = v; versionAt = Date.now(); });
+  async function newVersionReady() {
+    if (!bootVersion || Date.now() - versionAt < 60000) return false; // at most once a minute
+    versionAt = Date.now();
+    const v = await appVersion();
+    return !!v && v !== bootVersion;
+  }
+  document.addEventListener('visibilitychange', async () => {
+    if (document.hidden || !loaded) return;
+    if (!sheet.open && await newVersionReady()) { location.reload(); return; }
+    refresh().catch(() => {});
+  });
 
   render();
   refresh().then(loadPushState).catch((err) => { if (!needLogin) toast(err.message); });

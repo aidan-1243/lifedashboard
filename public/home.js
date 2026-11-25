@@ -43,7 +43,7 @@ export function homeDue(task, last, todayStr) {
     due = m ? endOfMonth(today.getUTCFullYear(), m) : endOfMonth(today.getUTCFullYear() + 1, ms[0]);
   }
   let snoozed = false;
-  if (task.snooze_until && task.snooze_until > ymd(due)) { due = parse(task.snooze_until); snoozed = task.snooze_until >= todayStr; }
+  if (task.snooze_until && task.snooze_until > ymd(due)) { due = parse(task.snooze_until); snoozed = task.snooze_until > todayStr; } // on the new due day it's simply due
   const k = Math.round((due - today) / 86400000);
   const label = k < 0 ? `Overdue ${-k}d` : k === 0 ? 'Due today' : k === 1 ? 'Due tomorrow' : k <= 6 ? `Due in ${k}d` : `Due ${fmt(due, today)}`;
   return { k, due: ymd(due), snoozed, completed: false, label, cls: k < 0 ? 'late' : k <= 6 ? 'soon' : 'ok' };
