@@ -362,7 +362,8 @@ import * as TK from './tasks.js';
   }
 
   // Lists where no row has a time drop the empty time column (otherwise items sit oddly far in)
-  const listCard = (rows) => { const timed = rows.some((r) => /class="when">\s*[^<\s]/.test(r));
+  // Lists drop the empty time column when nothing in them has a time; Today keeps it so every day lines up
+  const listCard = (rows, { keepWhen = false } = {}) => { const timed = keepWhen || rows.some((r) => /class="when">\s*[^<\s]/.test(r));
     return `<div class="card${timed ? '' : ' no-when'}"><ul class="list">${rows.join('')}</ul></div>`; };
   // Sections can fold away (remembered on this device) and carry a quick "+" button.
   let collapsed = new Set();
@@ -443,8 +444,8 @@ ${kindMark(icon, cls)}
         if (isToday && !e.all_day && new Date(e.end_at || e.start_at) <= now) continue;
         if (!isToday && new Date(e.start_at) < d0) continue; // multi-day events show on their first day
         const keep = (data.event_prefs || []).find((r) => r.key === e.one) || {};
-        out.push({ k: 'event', at: e.all_day ? null : Date.parse(e.start_at), html: trow({ when: e.all_day ? '' : fmtShortTime(e.start_at), icon: 'calendar', cls: 'k-event', title: esc(e.title),
-          meta: [e.all_day ? 'All day' : `${esc(fmtTime(e.start_at))}${e.end_at ? `–${esc(fmtTime(e.end_at))}` : ''}`, e.location ? esc(shortLoc(e.location)) : '', e.pref && e.pref.note ? esc(e.pref.note) : ''].filter(Boolean).join(' · '),
+        out.push({ k: 'event', at: e.all_day ? null : Date.parse(e.start_at), html: trow({ when: e.all_day ? 'All day' : fmtShortTime(e.start_at), icon: 'calendar', cls: 'k-event', title: esc(e.title),
+          meta: [e.all_day ? '' : `${esc(fmtTime(e.start_at))}${e.end_at ? `–${esc(fmtTime(e.end_at))}` : ''}`, e.location ? esc(shortLoc(e.location)) : '', e.pref && e.pref.note ? esc(e.pref.note) : ''].filter(Boolean).join('<br>'),
           open: `data-act="event" data-id="${e.id}"`, dismiss: e.all_day && isToday ? `data-act="ev-hide" data-key="${esc(e.one)}" data-keep='${esc(JSON.stringify({ note: keep.note || null, label: keep.label || e.title }))}'` : null }) });
       }
       // Tasks due this day (overdue ones are in Today's late block)
@@ -549,9 +550,9 @@ ${kindMark(icon, cls)}
       ${viewSetup()}
       <section aria-label="Today">${head(`Today <span class="n">${todayRows.length || ''}</span>`, { key: 'rest' })}
         ${!isCol('rest') && overdue.length ? `<button type="button" class="link tmove" data-act="late-tomorrow" data-ids="${overdue.map((i) => i.id).join(',')}">Move ${overdue.length === 1 ? 'the late task' : `all ${overdue.length} late tasks`} to tomorrow</button>` : ''}
-        ${isCol('rest') ? '' : todayRows.length ? listCard(todayRows) : `<div class="allclear">${synced ? 'Nothing else today. Enjoy it.' : 'Nothing yet. Calendar events appear once the Shortcut runs.'}</div>`}</section>
+        ${isCol('rest') ? '' : todayRows.length ? listCard(todayRows, { keepWhen: true }) : `<div class="allclear">${synced ? 'Nothing else today. Enjoy it.' : 'Nothing yet. Calendar events appear once the Shortcut runs.'}</div>`}</section>
       <section aria-label="This week">${head(`This week <span class="n">${weekDays.reduce((n, x) => n + x.rows.length, 0) || ''}</span>`, { key: 'upcoming', add: 'go-meals', addLabel: 'Plan dinners' })}
-        ${isCol('upcoming') ? '' : weekDays.length ? weekDays.map((x) => `<div class="tday"><button type="button" class="tday-h" data-act="day" data-date="${x.D}">${esc(x.d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }))}</button>${listCard(x.rows)}</div>`).join('') : '<div class="allclear">Nothing else this week.</div>'}</section>
+        ${isCol('upcoming') ? '' : weekDays.length ? weekDays.map((x) => `<div class="tday"><button type="button" class="tday-h" data-act="day" data-date="${x.D}">${esc(x.d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' }))}</button>${listCard(x.rows, { keepWhen: true })}</div>`).join('') : '<div class="allclear">Nothing else this week.</div>'}</section>
       ${catchUp}
       ${tgroup('Later', tripCard)}
       ${undated ? `<a class="link" href="#all">${plural(undated, 'task')} without a date ›</a>` : ''}
@@ -605,11 +606,8 @@ ${kindMark(icon, cls)}
 
   // Today's event detail: countdown and place.
   function eventMeta(e, now) {
-    if (e.all_day) return e.location ? esc(shortLoc(e.location)) : '';
-    const parts = [];
-    if (Date.parse(e.start_at) > now.getTime()) parts.push(`in ${untilText(e.start_at)}`);
-    if (e.location) parts.push(esc(shortLoc(e.location)));
-    return parts.join(' · ');
+    if (e.all_day) return placeLines('', e);
+    return placeLines(Date.parse(e.start_at) > now.getTime() ? `in ${untilText(e.start_at)}` : '', e);
   }
 
   // ---------- weather ----------
@@ -1451,7 +1449,7 @@ ${kindMark(icon, cls)}
     const row = (when, title, meta, open, at = null) => rows.push({ at, html: `<li class="row"><span class="when">${esc(when)}</span>${kindMark({ event: 'calendar', med: 'pill', home: 'home', trip: 'suitcase', person: /birthday/i.test(title) ? 'balloon' : 'heart', item: 'calendar' }[open.split(':')[0]] || 'calendar', { med: 'k-med', person: 'k-people', home: 'k-home', trip: 'k-travel' }[open.split(':')[0]] || '')}<button type="button" class="row-main" data-open="${esc(open)}"><div class="t">${esc(title)}</div>${meta ? `<div class="meta">${meta}</div>` : ''}</button></li>` });
     const evs = data.events.filter((e) => !(e.pref && e.pref.hidden) && !birthdayEventPerson(e.title, data.people) && new Date(e.start_at) < d1 && (e.end_at ? new Date(e.end_at) > d0 : new Date(e.start_at) >= d0))
       .sort((a, b) => (a.all_day - b.all_day) || (Date.parse(a.start_at) - Date.parse(b.start_at)));
-    for (const e of evs) row(e.all_day ? 'All day' : fmtShortTime(e.start_at), e.title, `Calendar${e.location ? ` · ${esc(shortLoc(e.location))}` : ''}`, `event:${e.id}`, e.all_day ? null : Math.max(+d0, Date.parse(e.start_at)));
+    for (const e of evs) row(e.all_day ? 'All day' : fmtShortTime(e.start_at), e.title, placeLines('Calendar', e), `event:${e.id}`, e.all_day ? null : Math.max(+d0, Date.parse(e.start_at)));
     for (const t of data.items.filter((i) => i.status === 'open' && i.due_at && new Date(i.due_at) >= d0 && new Date(i.due_at) < d1)) row(hasTime(t.due_at) ? fmtShortTime(t.due_at) : '', t.title, itemMeta(t, { skipDue: true }), `item:${t.id}`, hasTime(t.due_at) ? Date.parse(t.due_at) : null);
     for (const m of (data.meds || []).filter((x) => medDueOn(x, date))) { for (const slot of slotsOn(m, date)) { const [hh, mm] = slot.split(':').map(Number); const t0 = new Date(d0); t0.setHours(hh, mm, 0, 0); row(fmtSlot(slot), m.name, `Medication${m.dose ? ` · ${esc(m.dose)}` : ''}`, `med:${m.id}`, +t0); } }
     for (const h of (data.home_tasks || []).filter((t) => homeInfo(t).due === date)) row('', h.name, `Home · ${esc(h.room || '')}`, `home:${h.id}`);
@@ -1744,7 +1742,7 @@ ${kindMark(icon, cls)}
     const rows = [
       section('Tasks & notes', items.map((i) => itemRow(i))),
       section('People', people.map((p) => personRow(p, [p.circle ? CIRCLES[p.circle] : '', (data.gifts || []).filter((g) => g.person_id === p.id && has(g.idea)).map((g) => `gift: ${esc(g.idea)}`).join(', ')].filter(Boolean).join(' · ')))),
-      section('Calendar', events.map((e) => eventRow(e, { when: weekday(e.start_at), meta: `${esc(new Date(e.start_at).toLocaleDateString([], { month: 'short', day: 'numeric' }))}${e.all_day ? '' : ` · ${esc(fmtTime(e.start_at))}`}${e.location ? ` · ${esc(shortLoc(e.location))}` : ''}` }))),
+      section('Calendar', events.map((e) => eventRow(e, { when: weekday(e.start_at), meta: placeLines(`${esc(new Date(e.start_at).toLocaleDateString([], { month: 'short', day: 'numeric' }))}${e.all_day ? '' : ` · ${esc(fmtTime(e.start_at))}`}`, e) }))),
       section('Trips', trips.map((x) => `<li class="row"><a class="row-main" style="text-decoration:none;color:inherit" href="${esc(x.link || '#')}" target="_blank" rel="noopener"><div class="t">${esc(x.name)}</div><div class="meta">${esc(fmtRange(x.start_date, x.end_date))}</div></a></li>`)),
       section('Medications', meds.map((m) => allRow({ icon: 'pill', cls: 'k-med', title: esc(m.name), meta: esc(describeSchedule(m)), open: `data-act="med-open" data-id="${m.id}"` }))),
       section('Habits', habits.map((h) => allRow({ icon: 'check', cls: 'k-habit', title: esc(h.title), meta: streakOf(h).current ? `${streakOf(h).current} 🔥` : 'Habit', open: `data-act="task-open" data-id="${h.id}"` }))),
@@ -2449,7 +2447,10 @@ ${kindMark(icon, cls)}
   // Settings for a synced calendar event. Saved by title (all of them) or for
   // just this one, so they survive every calendar sync.
   // Apple Maps: the maps: link opens the Maps app on iPhone/iPad; elsewhere the web page.
-  const shortLoc = (loc) => String(loc || '').replace(/\s*\n\s*/g, ', ').replace(/,\s*(United States|USA|US)\s*$/i, '');
+  // In lists, just the place: "Marcus Theaters" or "2750 Rushmore Rd" (the full address is in the event, with Maps)
+  // Event second lines: the time (or other details) on one line, the place on its own line under it
+  const placeLines = (first, e) => [first, e.location ? esc(shortLoc(e.location)) : ''].filter(Boolean).join('<br>');
+  const shortLoc = (loc) => String(loc || '').split(/\s*[\n,]\s*/).filter(Boolean)[0] || '';
   const mapsUrl = (q) => `${/iPhone|iPad|Macintosh/.test(navigator.userAgent) && 'ontouchend' in document ? 'maps://' : 'https://maps.apple.com/'}?q=${encodeURIComponent(q.replace(/\s*\n\s*/g, ', '))}`;
   const mapLink = (loc) => `<a class="map-link" href="${esc(mapsUrl(loc))}"${mapsUrl(loc).startsWith('https') ? ' target="_blank" rel="noopener"' : ''}>${kindMark('pin')}<span>${esc(loc).replace(/\n/g, '<br>')}</span><b aria-hidden="true">›</b></a>`;
 
@@ -2540,7 +2541,7 @@ ${kindMark(icon, cls)}
       ${before.length ? listCard(before.map((i) => itemRow(i, { when: i.due_at ? fmtShortDate(i.due_at) : '' }))) : '<div class="tk-group"><div class="tk-row meta">Nothing left to book</div></div>'}
       <div class="lbl">During the trip</div>
       ${activities.length || events.length ? listCard([
-        ...events.map((e) => eventRow(e, { when: parseDay(RW.ymd(new Date(e.start_at))).toLocaleDateString([], { weekday: 'short', day: 'numeric' }), meta: e.all_day ? (e.location ? esc(shortLoc(e.location)) : 'All day') : `${esc(fmtTime(e.start_at))}${e.location ? ` · ${esc(shortLoc(e.location))}` : ''}` })),
+        ...events.map((e) => eventRow(e, { when: parseDay(RW.ymd(new Date(e.start_at))).toLocaleDateString([], { weekday: 'short', day: 'numeric' }), meta: placeLines(e.all_day ? 'All day' : esc(fmtTime(e.start_at)), e) })),
         ...activities.map((i) => itemRow(i, { when: fmtShortDate(i.due_at) })),
       ]) : '<div class="tk-group"><div class="tk-row meta">Nothing yet. Calendar events during these dates show up here.</div></div>'}
       ${doneItems.length ? `<details class="tk-done"><summary>Booked · ${doneItems.length}</summary>${listCard(doneItems.map((i) => itemRow(i, { when: '' })))}</details>` : ''}
