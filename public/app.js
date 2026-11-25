@@ -32,7 +32,7 @@ import * as TK from './tasks.js';
   let weatherAt = 0;
   let needLogin = false; // only used for local development (online, Cloudflare Access is the sign-in)
   let loaded = false;
-  const ui = { allType: 'all', rwTab: 'cards', rwWho: 'all', rwType: 'all', allArea: 'all', peopleFilter: 'birthdays', peopleQuery: '', showDone: false, q: '', homeView: 'now', homeRoom: '', homeQ: '', mealWeek: 0 };
+  const ui = { allType: 'all', rwTab: 'use', rwWho: 'all', rwType: 'all', allArea: 'all', peopleFilter: 'birthdays', peopleQuery: '', showDone: false, q: '', homeView: 'now', homeRoom: '', homeQ: '', mealWeek: 0 };
   const CIRCLES = { family: 'Family', close: 'Close friend', friends: 'Friend' };
   const inCircle = (p) => p && (p.circle === 'family' || p.circle === 'close');
 
@@ -2054,10 +2054,10 @@ import * as TK from './tasks.js';
   // RW.daysLeft counts today (the last day = 1); show it the way People and Today count ("in 6 days")
   const rwDays = (n) => { const d = n - 1; return d <= 0 ? 'last day' : d === 1 ? 'ends tomorrow' : `${d} days left`; };
   const rwPill = (v) => `<span class="rw-pill ${v.k}">${esc(v.label)}</span>`;
-  const RW_TABS = [['cards', 'Cards'], ['use', 'Credits'], ['points', 'Points']];
+  const RW_TABS = [['use', 'Credits'], ['cards', 'Cards'], ['points', 'Points']];
 
   function viewRewards() {
-    const tab = ui.rwTab || 'cards';
+    const tab = ui.rwTab || 'use';
     const body = tab === 'use' ? rwToUse() : tab === 'points' ? rwPoints() : rwCards();
     return `<header class="head-row"><h1>Rewards</h1><button type="button" class="sec-add" data-act="rw-add-card" aria-label="Add a card">+</button></header>
       <div class="seg3" role="group" aria-label="Rewards view">${RW_TABS.map(([k, l]) => `<button type="button" data-act="rw-tab" data-v="${k}" aria-pressed="${tab === k}">${l}</button>`).join('')}</div>
@@ -3411,7 +3411,7 @@ import * as TK from './tasks.js';
     }
     lastHash = location.hash;
     if (currentView() === 'people') { ui.peopleFilter = 'birthdays'; ui.peopleQuery = ''; } // People always opens on Birthdays
-    if (currentView() === 'rewards') ui.rwTab = 'cards'; // Rewards always opens on Cards
+    if (currentView() === 'rewards') ui.rwTab = 'use'; // Rewards always opens on Credits
     render(); window.scrollTo(0, 0);
   });
 
