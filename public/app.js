@@ -792,6 +792,12 @@ import * as TK from './tasks.js';
         <label class="tk-row"><span>Dose</span><select name="me_slot"></select></label>
         <div class="tk-row" style="justify-content:flex-end"><button type="button" class="btn dark" data-med-log>Log as taken</button></div>
       </div>` : ''}
+      ${t.kind === 'habit' && !isNew ? `<div class="btns2 tk-focus"><button type="button" class="pbtn" data-habit-earlier aria-expanded="false">Did it on an earlier day…</button></div>
+      <div class="tk-group med-earlier habit-earlier" hidden>
+        <label class="tk-row"><span>Day</span><select name="he_day"></select></label>
+        <label class="tk-row" data-he-slotrow><span>Time</span><select name="he_slot"></select></label>
+        <div class="tk-row" style="justify-content:flex-end"><button type="button" class="btn dark" data-habit-log>Log as done</button></div>
+      </div>` : ''}
       ${t.kind === 'catchup' && person ? `<div class="btns2 tk-focus"><button type="button" class="pbtn" data-talk-earlier aria-expanded="false">Talked on an earlier day…</button></div>${earlierPicker()}` : ''}
       ${isPeople ? `<div class="lbl">Details</div>
       <div class="tk-group">
@@ -884,6 +890,30 @@ import * as TK from './tasks.js';
         if (!daySel.value || !slotSel.value) return;
         sheet.dataset.dirty = ''; sheet.close();
         await logMed(t.id, slotSel.value, 'taken', daySel.value).catch((err) => toast(err.message));
+      };
+    }
+    // Earlier day for a habit: the last 7 days it was due, then that day's times (if it repeats more than once a day)
+    const habBtn = form.querySelector('[data-habit-earlier]');
+    if (habBtn) {
+      const box = form.querySelector('.habit-earlier'), daySel = form.he_day, slotSel = form.he_slot, slotRow = form.querySelector('[data-he-slotrow]');
+      const logs = new Map(taskLog(t).map((l) => [l.occ, l]));
+      const days = Array.from({ length: 7 }, (_, i) => TK.addDays(todayYmd(), -(i + 1))).filter((d) => (!t.date || d >= t.date) && TK.isDueOn(t, d));
+      const times = (d) => { const list = TK.occurrencesOn(t, d); return list.length ? list : ['']; };
+      const fillSlots = () => { const d = daySel.value, list = times(d);
+        slotSel.innerHTML = list.map((tm) => { const l = logs.get(TK.occKey(d, tm));
+          return `<option value="${esc(tm)}">${tm ? esc(fmtSlot(tm)) : 'Any time'}${l ? ` · already ${l.status === 'skipped' ? 'skipped' : 'done'}` : ''}</option>`; }).join('');
+        slotRow.hidden = list.length < 2;
+        const open1 = list.find((tm) => !logs.get(TK.occKey(d, tm))); if (open1 !== undefined) slotSel.value = open1; };
+      daySel.innerHTML = days.map((d, i) => { const missed = times(d).some((tm) => { const l = logs.get(TK.occKey(d, tm)); return !l || l.status === 'skipped'; });
+        return `<option value="${d}">${i === 0 && d === TK.addDays(todayYmd(), -1) ? 'Yesterday' : esc(parseDay(d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }))}${missed ? '' : ' · done'}</option>`; }).join('');
+      if (!days.length) { habBtn.disabled = true; habBtn.textContent = 'Not due in the last week'; }
+      else fillSlots();
+      daySel.onchange = fillSlots;
+      habBtn.onclick = () => { box.hidden = !box.hidden; habBtn.setAttribute('aria-expanded', String(!box.hidden)); };
+      form.querySelector('[data-habit-log]').onclick = async () => {
+        if (!daySel.value) return;
+        sheet.dataset.dirty = ''; sheet.close();
+        await taskDo(t, 'done', { key: TK.occKey(daySel.value, slotSel.value || '') }).catch((err) => toast(err.message));
       };
     }
     form.querySelectorAll('[data-tk]').forEach((b) => { b.onclick = async () => {
