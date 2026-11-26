@@ -495,7 +495,7 @@ import * as TK from './tasks.js';
         const s = streakOf(t).current;
         out.push({ k: 'habit', at: t.time ? at(D, t.time) : null, html: trow({ when: t.time ? fmtSlot(t.time) : '', icon: 'check', cls: 'k-habit', title: esc(t.title), meta: `Habit${s ? ` · ${s} 🔥` : ''}`,
           open: `data-act="task-open" data-id="${t.id}"`, done: { attrs: `data-act="habit" data-id="${t.id}"`, label: `Done: ${t.title}` },
-          later: { attrs: `data-act="task-skip" data-id="${t.id}" data-occ="${D}"`, label: 'Skip today' } }) });
+          later: { attrs: `data-act="task-skip" data-id="${t.id}" data-occ="${esc(o ? o.key : D)}"`, label: 'Skip today' } }) });
       }
       // Home: due this day (overdue ones are in Today's late block)
       for (const { t, i } of homeTasks.filter((x) => x.i.due === D && x.i.k >= 0)) {
